@@ -99,6 +99,9 @@ pub struct PartPipeline {
     pub index_buf: wgpu::Buffer,
     pub camera_buf: wgpu::Buffer,
     pub camera_bind_group: wgpu::BindGroup,
+    pub instance_buf: wgpu::Buffer,
+    pub instance_capacity: usize,
+    pub scratch_instances: Vec<PartInstance>,
 }
 
 impl PartPipeline {
@@ -207,12 +210,23 @@ impl PartPipeline {
             cache: None,
         });
 
+        let instance_capacity = 256;
+        let instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("part-instances"),
+            size: (instance_capacity * std::mem::size_of::<PartInstance>()) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         Self {
             pipeline,
             vertex_buf,
             index_buf,
             camera_buf,
             camera_bind_group,
+            instance_buf,
+            instance_capacity,
+            scratch_instances: Vec::with_capacity(instance_capacity),
         }
     }
 
@@ -235,26 +249,40 @@ impl PartPipeline {
     }
 
     pub fn render_parts(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         parts: &[Part],
+        sky_color: [f32; 3],
         camera: CameraUniform,
     ) {
         queue.write_buffer(&self.camera_buf, 0, bytemuck::bytes_of(&camera));
 
-        let instances: Vec<PartInstance> = parts
-            .iter()
-            .filter(|p| p.transparency < 0.95)
-            .map(PartInstance::from_part)
-            .collect();
-        let instance_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("part-instances"),
-            contents: bytemuck::cast_slice(&instances),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
+        self.scratch_instances.clear();
+        for p in parts {
+            if p.transparency < 0.95 {
+                self.scratch_instances.push(PartInstance::from_part(p));
+            }
+        }
+        let count = self.scratch_instances.len();
+        if count > self.instance_capacity {
+            self.instance_capacity = count.next_power_of_two();
+            self.instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("part-instances"),
+                size: (self.instance_capacity * std::mem::size_of::<PartInstance>()) as u64,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        }
+        if count > 0 {
+            queue.write_buffer(
+                &self.instance_buf,
+                0,
+                bytemuck::cast_slice(&self.scratch_instances),
+            );
+        }
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("part-encoder"),
@@ -268,9 +296,9 @@ impl PartPipeline {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.53,
-                            g: 0.77,
-                            b: 0.96,
+                            r: sky_color[0] as f64,
+                            g: sky_color[1] as f64,
+                            b: sky_color[2] as f64,
                             a: 1.0,
                         }),
                         store: wgpu::StoreOp::Store,
@@ -288,13 +316,13 @@ impl PartPipeline {
                 occlusion_query_set: None,
             });
 
-            if !instances.is_empty() {
+            if count > 0 {
                 pass.set_pipeline(&self.pipeline);
                 pass.set_bind_group(0, &self.camera_bind_group, &[]);
                 pass.set_vertex_buffer(0, self.vertex_buf.slice(..));
-                pass.set_vertex_buffer(1, instance_buf.slice(..));
+                pass.set_vertex_buffer(1, self.instance_buf.slice(..));
                 pass.set_index_buffer(self.index_buf.slice(..), wgpu::IndexFormat::Uint16);
-                pass.draw_indexed(0..36, 0, 0..instances.len() as u32);
+                pass.draw_indexed(0..36, 0, 0..count as u32);
             }
         }
 
@@ -528,8 +556,8 @@ fn try_wgpu_offscreen(
     });
     let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
     let depth_view = PartPipeline::create_depth_view(&device, width, height);
-    let pipeline = PartPipeline::new(&device, format);
-    pipeline.render_parts(&device, &queue, &color_view, &depth_view, parts, cam);
+    let mut pipeline = PartPipeline::new(&device, format);
+    pipeline.render_parts(&device, &queue, &color_view, &depth_view, parts, [0.53, 0.77, 0.96], cam);
 
     let padded_row = ((width * 4 + 255) / 256) * 256;
     let read_buf = device.create_buffer(&wgpu::BufferDescriptor {

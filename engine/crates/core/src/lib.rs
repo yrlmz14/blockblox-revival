@@ -69,6 +69,7 @@ pub struct InstanceNode {
 #[derive(Debug, Clone)]
 pub struct DataModel {
     pub parts: Vec<Part>,
+    pub spawn_points: Vec<Vec3>,
     pub scripts: Vec<(String, String)>,
     pub script_instances: Vec<usize>,
     pub instances: Vec<InstanceNode>,
@@ -80,6 +81,7 @@ impl Default for DataModel {
     fn default() -> Self {
         Self {
             parts: Vec::new(),
+            spawn_points: Vec::new(),
             scripts: Vec::new(),
             script_instances: Vec::new(),
             instances: vec![InstanceNode {
@@ -253,7 +255,23 @@ impl DataModel {
 
             match inst.class.as_str() {
                 "Part" | "WedgePart" | "CornerWedgePart" | "TrussPart" | "SpawnLocation" => {
-                    let (pos, rot, size, color, transparency, anchored) = extract_part_props(inst);
+                    let (pos, rot, size, color, transparency, mut anchored) = extract_part_props(inst);
+                    if inst.class.as_str() == "SpawnLocation" {
+                        self.spawn_points.push(pos + Vec3::new(0.0, size.y * 0.5 + 3.5, 0.0));
+                    }
+                    if !anchored {
+                        let has_weld = inst.children().iter().any(|&c| {
+                            dom.get_by_ref(c).is_some_and(|ch| {
+                                matches!(
+                                    ch.class.as_str(),
+                                    "Weld" | "Snap" | "ManualWeld" | "Glue" | "Motor" | "Motor6D"
+                                )
+                            })
+                        });
+                        if has_weld {
+                            anchored = true;
+                        }
+                    }
                     self.add_part_full(
                         inst.name.clone(),
                         pos,
@@ -443,7 +461,9 @@ fn extract_part_props(inst: &Instance) -> (Vec3, [[f32; 3]; 3], Vec3, [f32; 3], 
     };
 
     let anchored = matches!(
-        inst.properties.get(&ustr("Anchored")),
+        inst.properties
+            .get(&ustr("Anchored"))
+            .or_else(|| inst.properties.get(&ustr("anchored"))),
         Some(Variant::Bool(true))
     );
 

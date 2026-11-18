@@ -48,39 +48,164 @@ struct GpuState {
     pipeline: PartPipeline,
 }
 
+struct CharacterState {
+    spawn_pos: Vec3,
+    pos: Vec3,
+    vel: Vec3,
+    yaw: f32,
+    grounded: bool,
+    walk_phase: f32,
+    part_indices: [usize; 6],
+}
+
+impl CharacterState {
+    fn spawn(dm: &mut DataModel) -> Self {
+        let spawn_pos = dm
+            .spawn_points
+            .first()
+            .copied()
+            .unwrap_or(Vec3::new(0.0, 10.0, 0.0));
+        let yellow = [0.96, 0.80, 0.19];
+        let blue = [0.13, 0.45, 0.85];
+        let green = [0.25, 0.65, 0.25];
+
+        let head = dm.parts.len();
+        dm.add_part("CharHead", spawn_pos + Vec3::new(0.0, 1.5, 0.0), Vec3::new(1.2, 1.0, 1.0), yellow, true);
+        let torso = dm.parts.len();
+        dm.add_part("CharTorso", spawn_pos, Vec3::new(2.0, 2.0, 1.0), blue, true);
+        let l_arm = dm.parts.len();
+        dm.add_part("CharLeftArm", spawn_pos + Vec3::new(-1.5, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0), yellow, true);
+        let r_arm = dm.parts.len();
+        dm.add_part("CharRightArm", spawn_pos + Vec3::new(1.5, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0), yellow, true);
+        let l_leg = dm.parts.len();
+        dm.add_part("CharLeftLeg", spawn_pos + Vec3::new(-0.5, -2.0, 0.0), Vec3::new(1.0, 2.0, 1.0), green, true);
+        let r_leg = dm.parts.len();
+        dm.add_part("CharRightLeg", spawn_pos + Vec3::new(0.5, -2.0, 0.0), Vec3::new(1.0, 2.0, 1.0), green, true);
+
+        Self {
+            spawn_pos,
+            pos: spawn_pos,
+            vel: Vec3::ZERO,
+            yaw: 0.0,
+            grounded: false,
+            walk_phase: 0.0,
+            part_indices: [head, torso, l_arm, r_arm, l_leg, r_leg],
+        }
+    }
+
+    fn step(&mut self, dt: f32, move_input: [f32; 2], jump: bool, cam_yaw: f32, dm: &mut DataModel) {
+        let forward = Vec3::new(cam_yaw.sin(), 0.0, -cam_yaw.cos());
+        let right = Vec3::new(cam_yaw.cos(), 0.0, cam_yaw.sin());
+        let wish = forward * move_input[1] + right * move_input[0];
+        let speed = 20.0;
+        if wish.length_squared() > 0.01 {
+            let dir = wish.normalize();
+            self.vel.x = dir.x * speed;
+            self.vel.z = dir.z * speed;
+            self.yaw = dir.x.atan2(-dir.z);
+            self.walk_phase += dt * 10.0;
+        } else {
+            self.vel.x *= 0.7;
+            self.vel.z *= 0.7;
+        }
+
+        if jump && self.grounded {
+            self.vel.y = 24.0;
+            self.grounded = false;
+        }
+        self.vel.y -= 52.0 * dt;
+
+        let prev_feet = self.pos.y - 3.0;
+        self.pos += self.vel * dt;
+        self.grounded = false;
+
+        // Ground & platform collision against static world parts
+        let feet_y = self.pos.y - 3.0;
+        let char_r = 0.9;
+        let char_count = self.part_indices[0];
+        let mut best_y: Option<f32> = None;
+        for p in &dm.parts[..char_count] {
+            if p.transparency >= 0.95 {
+                continue;
+            }
+            let hx = p.size.x * 0.5 + char_r;
+            let hz = p.size.z * 0.5 + char_r;
+            if (self.pos.x - p.position.x).abs() <= hx && (self.pos.z - p.position.z).abs() <= hz {
+                let top_y = p.position.y + p.size.y * 0.5;
+                if self.vel.y <= 0.0 && prev_feet >= top_y - 1.2 && feet_y <= top_y {
+                    best_y = Some(best_y.map_or(top_y, |b: f32| b.max(top_y)));
+                }
+            }
+        }
+        if let Some(gy) = best_y {
+            self.pos.y = gy + 3.0;
+            self.vel.y = 0.0;
+            self.grounded = true;
+        }
+
+        if self.pos.y < -150.0 {
+            self.pos = self.spawn_pos;
+            self.vel = Vec3::ZERO;
+        }
+
+        // Update 6 R6 character parts
+        let rot = glam::Mat3::from_rotation_y(-self.yaw);
+        let swing = if wish.length_squared() > 0.01 && self.grounded {
+            self.walk_phase.sin() * 0.35
+        } else {
+            0.0
+        };
+        let offsets = [
+            Vec3::new(0.0, 1.5, 0.0),
+            Vec3::ZERO,
+            Vec3::new(-1.5, 0.0, -swing),
+            Vec3::new(1.5, 0.0, swing),
+            Vec3::new(-0.5, -2.0, swing),
+            Vec3::new(0.5, -2.0, -swing),
+        ];
+        let rot_arr = rot.to_cols_array_2d();
+        for (i, &idx) in self.part_indices.iter().enumerate() {
+            if let Some(p) = dm.parts.get_mut(idx) {
+                p.position = self.pos + rot * offsets[i];
+                p.rotation = rot_arr;
+            }
+        }
+    }
+}
+
 pub struct ClientApp {
     session: ClientSession,
+    character: CharacterState,
     gpu: Option<GpuState>,
-    cam_pos: Vec3,
     cam_yaw: f32,
-    last_touch: Option<(f64, f64)>,
+    cam_pitch: f32,
+    keys: [bool; 4], // W, S, A, D
+    jump_requested: bool,
+    move_touch: Option<(u64, f64, f64, f64, f64)>,
+    cam_touch: Option<(u64, f64, f64, std::time::Instant)>,
+    last_tick: std::time::Instant,
 }
 
 impl ClientApp {
-    pub fn new(session: ClientSession) -> Self {
+    pub fn new(mut session: ClientSession) -> Self {
+        let character = CharacterState::spawn(&mut session.data_model);
         Self {
             session,
+            character,
             gpu: None,
-            cam_pos: Vec3::new(0.0, 12.0, 28.0),
             cam_yaw: 0.0,
-            last_touch: None,
+            cam_pitch: 0.25,
+            keys: [false; 4],
+            jump_requested: false,
+            move_touch: None,
+            cam_touch: None,
+            last_tick: std::time::Instant::now(),
         }
     }
 
     pub fn auto_frame_camera(&mut self) {
-        let visible: Vec<_> = self
-            .session
-            .data_model
-            .parts
-            .iter()
-            .filter(|p| p.transparency < 0.95 && p.position.length() < 500.0)
-            .collect();
-        if visible.len() > 10 {
-            let sum: Vec3 = visible.iter().map(|p| p.position).sum();
-            let center = sum / (visible.len() as f32);
-            self.cam_pos = center + Vec3::new(0.0, 65.0, 120.0);
-            self.cam_yaw = 0.0;
-        }
+        self.cam_yaw = 0.0;
+        self.cam_pitch = 0.25;
     }
 
     pub fn run(mut self) -> anyhow::Result<()> {
@@ -258,57 +383,93 @@ impl ApplicationHandler for ClientApp {
                 event:
                     KeyEvent {
                         physical_key: PhysicalKey::Code(code),
-                        state: ElementState::Pressed,
+                        state,
                         ..
                     },
                 ..
             } => {
-                let forward = Vec3::new(self.cam_yaw.sin(), 0.0, -self.cam_yaw.cos());
-                let right = Vec3::new(self.cam_yaw.cos(), 0.0, self.cam_yaw.sin());
+                let pressed = state == ElementState::Pressed;
                 match code {
-                    KeyCode::KeyW | KeyCode::ArrowUp => self.cam_pos += forward * 1.5,
-                    KeyCode::KeyS | KeyCode::ArrowDown => self.cam_pos -= forward * 1.5,
-                    KeyCode::KeyD => self.cam_pos += right * 1.5,
-                    KeyCode::KeyA => self.cam_pos -= right * 1.5,
-                    KeyCode::ArrowLeft => self.cam_yaw -= 0.1,
-                    KeyCode::ArrowRight => self.cam_yaw += 0.1,
+                    KeyCode::KeyW | KeyCode::ArrowUp => self.keys[0] = pressed,
+                    KeyCode::KeyS | KeyCode::ArrowDown => self.keys[1] = pressed,
+                    KeyCode::KeyA => self.keys[2] = pressed,
+                    KeyCode::KeyD => self.keys[3] = pressed,
+                    KeyCode::Space if pressed => self.jump_requested = true,
+                    KeyCode::ArrowLeft | KeyCode::KeyQ if pressed => self.cam_yaw -= 0.12,
+                    KeyCode::ArrowRight | KeyCode::KeyE if pressed => self.cam_yaw += 0.12,
                     _ => {}
-                }
-                if let Some(gpu) = &self.gpu {
-                    gpu.window.request_redraw();
                 }
             }
             WindowEvent::Touch(touch) => {
                 use winit::event::TouchPhase;
+                let width = self.gpu.as_ref().map_or(1080.0, |g| g.config.width as f64);
+                let is_left = touch.location.x < width * 0.5;
                 match touch.phase {
                     TouchPhase::Started => {
-                        self.last_touch = Some((touch.location.x, touch.location.y));
+                        if is_left && self.move_touch.is_none() {
+                            self.move_touch = Some((
+                                touch.id,
+                                touch.location.x,
+                                touch.location.y,
+                                touch.location.x,
+                                touch.location.y,
+                            ));
+                        } else if !is_left && self.cam_touch.is_none() {
+                            self.cam_touch = Some((
+                                touch.id,
+                                touch.location.x,
+                                touch.location.y,
+                                std::time::Instant::now(),
+                            ));
+                        }
                     }
                     TouchPhase::Moved => {
-                        if let Some((lx, ly)) = self.last_touch {
-                            let dx = (touch.location.x - lx) as f32;
-                            let dy = (touch.location.y - ly) as f32;
-                            self.cam_yaw += dx * 0.005;
-                            let forward = Vec3::new(self.cam_yaw.sin(), 0.0, -self.cam_yaw.cos());
-                            self.cam_pos -= forward * (dy * 0.08);
+                        if let Some((id, sx, sy, _, _)) = self.move_touch {
+                            if id == touch.id {
+                                self.move_touch = Some((id, sx, sy, touch.location.x, touch.location.y));
+                            }
                         }
-                        self.last_touch = Some((touch.location.x, touch.location.y));
+                        if let Some((id, lx, ly, t0)) = self.cam_touch {
+                            if id == touch.id {
+                                let dx = (touch.location.x - lx) as f32;
+                                let dy = (touch.location.y - ly) as f32;
+                                self.cam_yaw += dx * 0.006;
+                                self.cam_pitch = (self.cam_pitch + dy * 0.004).clamp(-0.2, 1.1);
+                                self.cam_touch = Some((id, touch.location.x, touch.location.y, t0));
+                            }
+                        }
                     }
                     TouchPhase::Ended | TouchPhase::Cancelled => {
-                        self.last_touch = None;
+                        if self.move_touch.is_some_and(|(id, ..)| id == touch.id) {
+                            self.move_touch = None;
+                        }
+                        if let Some((id, _, _, t0)) = self.cam_touch {
+                            if id == touch.id {
+                                if t0.elapsed().as_millis() < 220 {
+                                    self.jump_requested = true;
+                                }
+                                self.cam_touch = None;
+                            }
+                        }
                     }
                 }
             }
             WindowEvent::RedrawRequested => {
-                if let Some(gpu) = &self.gpu {
+                if let Some(gpu) = &mut self.gpu {
                     if let Ok(frame) = gpu.surface.get_current_texture() {
                         let color_view = frame
                             .texture
                             .create_view(&wgpu::TextureViewDescriptor::default());
                         let aspect = gpu.config.width as f32 / gpu.config.height as f32;
-                        let target = self.cam_pos
-                            + Vec3::new(self.cam_yaw.sin(), -0.25, -self.cam_yaw.cos());
-                        let cam = build_camera_matrix(self.cam_pos, target, aspect);
+                        let dist = 14.0;
+                        let cam_pos = self.character.pos
+                            + Vec3::new(
+                                -self.cam_yaw.sin() * dist * self.cam_pitch.cos(),
+                                3.0 + dist * self.cam_pitch.sin(),
+                                self.cam_yaw.cos() * dist * self.cam_pitch.cos(),
+                            );
+                        let target = self.character.pos + Vec3::new(0.0, 1.5, 0.0);
+                        let cam = build_camera_matrix(cam_pos, target, aspect);
 
                         gpu.pipeline.render_parts(
                             &gpu.device,
@@ -316,6 +477,7 @@ impl ApplicationHandler for ClientApp {
                             &color_view,
                             &gpu.depth_view,
                             &self.session.data_model.parts,
+                            self.session.data_model.sky.sky_top,
                             cam,
                         );
                         frame.present();
@@ -327,9 +489,32 @@ impl ApplicationHandler for ClientApp {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+        let now = std::time::Instant::now();
+        let elapsed = now.duration_since(self.last_tick);
+        if elapsed < std::time::Duration::from_millis(16) {
+            return;
+        }
+        let dt = elapsed.as_secs_f32().min(1.0 / 30.0);
+        self.last_tick = now;
+
+        let mut move_x = (self.keys[3] as i32 - self.keys[2] as i32) as f32;
+        let mut move_z = (self.keys[0] as i32 - self.keys[1] as i32) as f32;
+        if let Some((_, sx, sy, cx, cy)) = self.move_touch {
+            let dx = ((cx - sx) / 80.0).clamp(-1.0, 1.0) as f32;
+            let dy = ((sy - cy) / 80.0).clamp(-1.0, 1.0) as f32;
+            if dx.abs() > 0.1 || dy.abs() > 0.1 {
+                move_x = dx;
+                move_z = dy;
+            }
+        }
+
+        let jump = std::mem::take(&mut self.jump_requested);
+        self.character
+            .step(dt, [move_x, move_z], jump, self.cam_yaw, &mut self.session.data_model);
         self.session
             .physics
-            .step(1.0 / 60.0, &mut self.session.data_model);
+            .step(dt, &mut self.session.data_model);
+
         if let Some(gpu) = &self.gpu {
             gpu.window.request_redraw();
         }
