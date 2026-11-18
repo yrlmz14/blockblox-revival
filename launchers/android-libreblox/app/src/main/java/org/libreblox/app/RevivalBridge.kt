@@ -12,13 +12,16 @@ import java.net.URL
  */
 object RevivalBridge {
     private var nativeLoaded = false
+    var lastLoadError: String? = null
+        private set
 
     init {
         try {
             System.loadLibrary("revival_client")
             nativeLoaded = true
-        } catch (_: UnsatisfiedLinkError) {
+        } catch (e: UnsatisfiedLinkError) {
             nativeLoaded = false
+            lastLoadError = e.message
         }
     }
 

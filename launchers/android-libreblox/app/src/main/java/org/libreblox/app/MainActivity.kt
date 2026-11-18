@@ -67,11 +67,14 @@ fun RevivalLauncherScreen() {
     val scope = rememberCoroutineScope()
     var serverUrl by remember { mutableStateOf("http://192.168.1.100:8080") }
     var statusText by remember {
+        val crashFile = File(ctx.filesDir, "last_crash.txt")
+        val crashMsg = if (crashFile.exists()) crashFile.readText() else null
         mutableStateOf(
-            if (RevivalBridge.isNativeEngineAvailable()) {
-                "Native engine (librevival_client.so) ready. No roblox.com login required."
-            } else {
-                "Warning: librevival_client.so not loaded."
+            when {
+                !RevivalBridge.isNativeEngineAvailable() ->
+                    "Native engine failed to load: ${RevivalBridge.lastLoadError ?: "unknown error"}"
+                !crashMsg.isNullOrBlank() -> crashMsg
+                else -> "Native engine (librevival_client.so) ready. No roblox.com login required."
             }
         )
     }
@@ -80,6 +83,10 @@ fun RevivalLauncherScreen() {
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
         if (uri == null) return@rememberLauncherForActivityResult
+        if (!RevivalBridge.isNativeEngineAvailable()) {
+            statusText = "Cannot launch: ${RevivalBridge.lastLoadError ?: "librevival_client.so missing"}"
+            return@rememberLauncherForActivityResult
+        }
         try {
             val bytes = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
             if (bytes == null || bytes.isEmpty()) {

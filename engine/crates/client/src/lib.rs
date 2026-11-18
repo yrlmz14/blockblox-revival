@@ -67,6 +67,22 @@ impl ClientApp {
         }
     }
 
+    pub fn auto_frame_camera(&mut self) {
+        let visible: Vec<_> = self
+            .session
+            .data_model
+            .parts
+            .iter()
+            .filter(|p| p.transparency < 0.95 && p.position.length() < 500.0)
+            .collect();
+        if visible.len() > 10 {
+            let sum: Vec3 = visible.iter().map(|p| p.position).sum();
+            let center = sum / (visible.len() as f32);
+            self.cam_pos = center + Vec3::new(0.0, 65.0, 120.0);
+            self.cam_yaw = 0.0;
+        }
+    }
+
     pub fn run(mut self) -> anyhow::Result<()> {
         let event_loop = EventLoop::new()?;
         event_loop.run_app(&mut self)?;
@@ -88,16 +104,53 @@ impl ClientApp {
 #[cfg(target_os = "android")]
 #[no_mangle]
 fn android_main(app: winit::platform::android::activity::AndroidApp) {
-    let mut session = app
-        .internal_data_path()
-        .and_then(|dir| std::fs::read(dir.join("pending_place.rbxl")).ok())
-        .and_then(|bytes| ClientSession::from_place_bytes(&bytes).ok())
+    let data_dir = app.internal_data_path();
+    if let Some(dir) = &data_dir {
+        let crash_path = dir.join("last_crash.txt");
+        let _ = std::fs::remove_file(&crash_path);
+        std::panic::set_hook(Box::new(move |info| {
+            let _ = std::fs::write(&crash_path, format!("Engine panic: {info}"));
+        }));
+    }
+
+    let place_bytes = data_dir
+        .as_ref()
+        .and_then(|dir| std::fs::read(dir.join("pending_place.rbxl")).ok());
+
+    let dir_for_err = data_dir.clone();
+    let session = std::thread::Builder::new()
+        .stack_size(8 * 1024 * 1024)
+        .spawn(move || {
+            let mut session = match place_bytes {
+                Some(bytes) => match ClientSession::from_place_bytes(&bytes) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        if let Some(dir) = &dir_for_err {
+                            let _ = std::fs::write(
+                                dir.join("last_crash.txt"),
+                                format!("Failed to parse .rbxl: {e:#}"),
+                            );
+                        }
+                        ClientSession::offline_baseplate()
+                    }
+                },
+                None => ClientSession::offline_baseplate(),
+            };
+            let _ = session.data_model.run_luau_scripts_mut();
+            session.physics = PhysicsWorld::from_data_model(&session.data_model);
+            session
+        })
+        .ok()
+        .and_then(|h| h.join().ok())
         .unwrap_or_else(ClientSession::offline_baseplate);
 
-    let _ = session.data_model.run_luau_scripts_mut();
-    session.physics = PhysicsWorld::from_data_model(&session.data_model);
-
-    let _ = ClientApp::new(session).run_android(app);
+    let mut client = ClientApp::new(session);
+    client.auto_frame_camera();
+    if let Err(e) = client.run_android(app) {
+        if let Some(dir) = &data_dir {
+            let _ = std::fs::write(dir.join("last_crash.txt"), format!("Engine error: {e:#}"));
+        }
+    }
 }
 
 impl ApplicationHandler for ClientApp {
@@ -116,52 +169,62 @@ impl ApplicationHandler for ClientApp {
             attrs.with_canvas(canvas)
         };
 
-        let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
+        let Ok(window) = event_loop.create_window(attrs) else {
+            return;
+        };
+        let window = Arc::new(window);
         let size = window.inner_size();
 
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let instance = wgpu::Instance::default();
-            let surface = instance
-                .create_surface(window.clone())
-                .expect("create surface");
-            let adapter =
-                pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            let try_init = |backends: wgpu::Backends| -> Option<GpuState> {
+                let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                    backends,
+                    ..Default::default()
+                });
+                let surface = instance.create_surface(window.clone()).ok()?;
+                let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
                     compatible_surface: Some(&surface),
                     ..Default::default()
-                }))
-                .expect("find GPU adapter");
+                }))?;
 
-            let (device, queue) =
-                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default(), None))
-                    .expect("create GPU device");
+                let desc = wgpu::DeviceDescriptor {
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                        .using_resolution(adapter.limits()),
+                    ..Default::default()
+                };
+                let (device, queue) = pollster::block_on(adapter.request_device(&desc, None)).ok()?;
 
-            let caps = surface.get_capabilities(&adapter);
-            let format = caps.formats[0];
-            let config = wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
-                width: size.width.max(1),
-                height: size.height.max(1),
-                present_mode: wgpu::PresentMode::Fifo,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-                desired_maximum_frame_latency: 2,
+                let caps = surface.get_capabilities(&adapter);
+                let format = caps.formats.first().copied()?;
+                let alpha_mode = caps.alpha_modes.first().copied()?;
+                let config = wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format,
+                    width: size.width.max(1),
+                    height: size.height.max(1),
+                    present_mode: wgpu::PresentMode::Fifo,
+                    alpha_mode,
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                };
+                surface.configure(&device, &config);
+
+                let depth_view = PartPipeline::create_depth_view(&device, config.width, config.height);
+                let pipeline = PartPipeline::new(&device, format);
+
+                Some(GpuState {
+                    window: window.clone(),
+                    surface,
+                    device,
+                    queue,
+                    config,
+                    depth_view,
+                    pipeline,
+                })
             };
-            surface.configure(&device, &config);
 
-            let depth_view = PartPipeline::create_depth_view(&device, config.width, config.height);
-            let pipeline = PartPipeline::new(&device, format);
-
-            self.gpu = Some(GpuState {
-                window,
-                surface,
-                device,
-                queue,
-                config,
-                depth_view,
-                pipeline,
-            });
+            self.gpu = try_init(wgpu::Backends::all()).or_else(|| try_init(wgpu::Backends::GL));
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -170,6 +233,10 @@ impl ApplicationHandler for ClientApp {
             // On wasm32, surface/adapter/device are initialized asynchronously via wasm_bindgen_futures::spawn_local.
             let _ = window;
         }
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        self.gpu = None;
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
