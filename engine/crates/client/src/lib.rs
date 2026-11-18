@@ -53,6 +53,7 @@ pub struct ClientApp {
     gpu: Option<GpuState>,
     cam_pos: Vec3,
     cam_yaw: f32,
+    last_touch: Option<(f64, f64)>,
 }
 
 impl ClientApp {
@@ -60,8 +61,9 @@ impl ClientApp {
         Self {
             session,
             gpu: None,
-            cam_pos: Vec3::new(0.0, 10.0, 24.0),
+            cam_pos: Vec3::new(0.0, 12.0, 28.0),
             cam_yaw: 0.0,
+            last_touch: None,
         }
     }
 
@@ -70,26 +72,32 @@ impl ClientApp {
         event_loop.run_app(&mut self)?;
         Ok(())
     }
+
+    #[cfg(target_os = "android")]
+    pub fn run_android(
+        mut self,
+        app: winit::platform::android::activity::AndroidApp,
+    ) -> anyhow::Result<()> {
+        use winit::platform::android::EventLoopBuilderExtAndroid;
+        let event_loop = EventLoop::builder().with_android_app(app).build()?;
+        event_loop.run_app(&mut self)?;
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "android")]
 #[no_mangle]
-pub extern "C" fn Java_org_libreblox_app_RevivalBridge_nativeStartOfflineBytes(
-    _env: *mut std::ffi::c_void,
-    _class: *mut std::ffi::c_void,
-    _bytes: *mut std::ffi::c_void,
-) -> bool {
-    true
-}
+fn android_main(app: winit::platform::android::activity::AndroidApp) {
+    let mut session = app
+        .internal_data_path()
+        .and_then(|dir| std::fs::read(dir.join("pending_place.rbxl")).ok())
+        .and_then(|bytes| ClientSession::from_place_bytes(&bytes).ok())
+        .unwrap_or_else(ClientSession::offline_baseplate);
 
-#[cfg(target_os = "android")]
-#[no_mangle]
-pub extern "C" fn Java_org_libreblox_app_RevivalBridge_nativeStartOnlineWs(
-    _env: *mut std::ffi::c_void,
-    _class: *mut std::ffi::c_void,
-    _ws_url: *mut std::ffi::c_void,
-) -> bool {
-    true
+    let _ = session.data_model.run_luau_scripts_mut();
+    session.physics = PhysicsWorld::from_data_model(&session.data_model);
+
+    let _ = ClientApp::new(session).run_android(app);
 }
 
 impl ApplicationHandler for ClientApp {
@@ -201,6 +209,27 @@ impl ApplicationHandler for ClientApp {
                 }
                 if let Some(gpu) = &self.gpu {
                     gpu.window.request_redraw();
+                }
+            }
+            WindowEvent::Touch(touch) => {
+                use winit::event::TouchPhase;
+                match touch.phase {
+                    TouchPhase::Started => {
+                        self.last_touch = Some((touch.location.x, touch.location.y));
+                    }
+                    TouchPhase::Moved => {
+                        if let Some((lx, ly)) = self.last_touch {
+                            let dx = (touch.location.x - lx) as f32;
+                            let dy = (touch.location.y - ly) as f32;
+                            self.cam_yaw += dx * 0.005;
+                            let forward = Vec3::new(self.cam_yaw.sin(), 0.0, -self.cam_yaw.cos());
+                            self.cam_pos -= forward * (dy * 0.08);
+                        }
+                        self.last_touch = Some((touch.location.x, touch.location.y));
+                    }
+                    TouchPhase::Ended | TouchPhase::Cancelled => {
+                        self.last_touch = None;
+                    }
                 }
             }
             WindowEvent::RedrawRequested => {
