@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>Revival Launcher (iOS WASM / macOS)</title>
+  <style>
+    :root { color-scheme: dark; font-family: system-ui, -apple-system, sans-serif; }
+    body { margin: 0; background: #0f1117; color: #e6edf3; display: grid; place-items: center; min-height: 100vh; }
+    .card { width: min(520px, 92vw); background: #161b22; border: 1px solid #30363d; border-radius: 14px; padding: 20px; }
+    h1 { margin: 0 0 8px; font-size: 1.25rem; }
+    p { margin: 0 0 16px; color: #8b949e; font-size: 0.9rem; }
+    .row { display: flex; gap: 8px; margin-bottom: 12px; }
+    input, button { padding: 10px 12px; border-radius: 8px; border: 1px solid #30363d; background: #0d1117; color: #e6edf3; font-size: 0.95rem; }
+    input { flex: 1; }
+    button { background: #238636; border-color: #2ea043; font-weight: 600; cursor: pointer; }
+    button.secondary { background: #21262d; border-color: #30363d; }
+    pre { background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px; font-size: 0.8rem; max-height: 180px; overflow: auto; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Revival Launcher (WebAssembly / PWA)</h1>
+    <p>Online (Pi Zero 2 W WebSocket) &amp; Offline (.rbxl / .rbxlx) starter shell.</p>
+
+    <div class="row">
+      <input id="serverUrl" value="ws://raspberrypi.local:8080/ws" placeholder="ws://pi-zero-ip:8080/ws" />
+      <button id="connectBtn">Join Online</button>
+    </div>
+
+    <div class="row">
+      <input id="placeFile" type="file" accept=".rbxl,.rbxlx" />
+      <button id="offlineBtn" class="secondary">Play Offline</button>
+    </div>
+
+    <pre id="log">Ready.</pre>
+    <canvas id="revival-canvas" width="480" height="270" style="width:100%;margin-top:12px;border-radius:8px;background:#090c10;border:1px solid #30363d;"></canvas>
+  </div>
+
+  <script>
+    const logEl = document.getElementById('log');
+    const serverUrlEl = document.getElementById('serverUrl');
+    if (location.host) {
+      const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      serverUrlEl.value = `${proto}//${location.host}/ws`;
+    }
+    const log = (m) => { logEl.textContent += `\n${m}`; logEl.scrollTop = logEl.scrollHeight; };
+
+    document.getElementById('connectBtn').onclick = () => {
+      const url = serverUrlEl.value.trim();
+      log(`Connecting to ${url}...`);
+      const ws = new WebSocket(url);
+      ws.onopen = () => {
+        log('Connected! Sending join...');
+        ws.send(JSON.stringify({ type: 'join', username: 'iOSPlayer' }));
+      };
+      ws.onmessage = (e) => log(`Server: ${e.data.slice(0, 200)}`);
+      ws.onerror = () => log('WebSocket error (check Pi Zero 2 W IP/port).');
+      ws.onclose = () => log('Disconnected.');
+    };
+
+    document.getElementById('offlineBtn').onclick = async () => {
+      const file = document.getElementById('placeFile').files[0];
+      if (!file) return log('Select a .rbxl or .rbxlx file first.');
+      const buf = await file.arrayBuffer();
+      log(`Loaded offline place "${file.name}" (${buf.byteLength} bytes). Ready to pass to WASM engine.`);
+    };
+  </script>
+</body>
+</html>

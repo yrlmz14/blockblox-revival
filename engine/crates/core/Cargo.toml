@@ -1,0 +1,20 @@
+[package]
+name = "revival-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["luau"]
+luau = ["dep:mlua"]
+
+[dependencies]
+anyhow.workspace = true
+glam.workspace = true
+serde.workspace = true
+mlua = { version = "0.10", features = ["luau", "vendored"], optional = true }
+rbx_dom_weak = "3"
+rbx_binary = "1"
+rbx_xml = "1"
+rbx_types = "1"
+rapier3d = "0.22"

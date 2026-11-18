@@ -1,0 +1,23 @@
+# Build artifacts & binaries
+engine/target/
+revival-server-x86_64
+*.apk
+*.aab
+*.so
+
+# Android / Gradle local caches
+launchers/android-libreblox/.gradle/
+launchers/android-libreblox/app/build/
+launchers/android-libreblox/build/
+launchers/android-libreblox/local.properties
+
+# Home directory / VM environment files
+.bash_logout
+.bashrc
+.cache/
+.cargo/
+.gemini/
+.gitconfig
+.local/
+.profile
+upload/
