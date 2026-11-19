@@ -34,5 +34,7 @@ winit = { version = "0.30", features = ["android-native-activity"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 console_error_panic_hook = "0.1"
+getrandom = { version = "0.2", features = ["js"] }
+getrandom03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
 web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "Performance"] }
 wgpu = { version = "24", features = ["webgl"] }

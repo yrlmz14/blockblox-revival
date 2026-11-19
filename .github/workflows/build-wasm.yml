@@ -20,6 +20,8 @@ jobs:
 
       - name: Build revival-client.wasm (wasm32-unknown-unknown)
         working-directory: engine
+        env:
+          RUSTFLAGS: '--cfg getrandom_backend="wasm_js"'
         run: |
           cargo build --release --target wasm32-unknown-unknown -p revival-client --no-default-features --lib
           wasm-bindgen --target web --out-dir ../launchers/web-pwa/pkg target/wasm32-unknown-unknown/release/revival_client.wasm
