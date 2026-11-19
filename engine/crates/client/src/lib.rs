@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use glam::{Mat3, Vec3};
 use renderer::{build_frame_uniform, HudState, PartPipeline};
-use revival_core::{physics::PhysicsWorld, DataModel, PartShape};
+use revival_core::{
+    physics::PhysicsWorld, DataModel, DecalKind, PartMaterial, PartShape, SurfaceType, ToolIconKind,
+};
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, KeyEvent, WindowEvent},
@@ -48,49 +50,141 @@ struct GpuState {
     pipeline: PartPipeline,
 }
 
-struct CharacterState {
+pub struct CharacterState {
     spawn_pos: Vec3,
     pos: Vec3,
     vel: Vec3,
     yaw: f32,
     grounded: bool,
     walk_phase: f32,
+    idle_time: f32,
+    pub health: f32,
     part_indices: [usize; 6],
+    tool_part_indices: [usize; 4],
 }
 
 impl CharacterState {
-    fn spawn(dm: &mut DataModel) -> Self {
+    pub fn spawn(dm: &mut DataModel) -> Self {
         let spawn_pos = dm
             .spawn_points
             .first()
             .copied()
             .unwrap_or(Vec3::new(0.0, 10.0, 0.0));
+        // Classic Roblox Noob palette (Bright Yellow, Bright Blue, Br. Yellowish Green)
         let yellow = [0.96, 0.80, 0.19];
         let blue = [0.05, 0.41, 0.67];
         let green = [0.29, 0.59, 0.29];
         let ident = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
 
         let head = dm.parts.len();
-        dm.add_part_shaped(
+        dm.add_part_styled(
             "CharHead",
-            spawn_pos + Vec3::new(0.0, 1.5, 0.0),
-            Vec3::new(1.2, 1.15, 1.2),
+            spawn_pos + Vec3::new(0.0, 1.55, 0.0),
+            Vec3::new(1.22, 1.18, 1.22),
             ident,
             yellow,
             0.0,
             true,
-            PartShape::Cylinder,
+            PartShape::Head,
+            PartMaterial::SmoothPlastic,
+            SurfaceType::Smooth,
+            SurfaceType::Smooth,
+            DecalKind::ClassicFace,
         );
         let torso = dm.parts.len();
-        dm.add_part("CharTorso", spawn_pos, Vec3::new(2.0, 2.0, 1.0), blue, true);
+        dm.add_part_styled(
+            "CharTorso",
+            spawn_pos,
+            Vec3::new(2.0, 2.0, 1.0),
+            ident,
+            blue,
+            0.0,
+            true,
+            PartShape::BevelBlock,
+            PartMaterial::SmoothPlastic,
+            SurfaceType::Smooth,
+            SurfaceType::Smooth,
+            DecalKind::ClassicShirt,
+        );
         let l_arm = dm.parts.len();
-        dm.add_part("CharLeftArm", spawn_pos + Vec3::new(-1.5, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0), yellow, true);
+        dm.add_part_styled(
+            "CharLeftArm",
+            spawn_pos + Vec3::new(-1.5, 0.0, 0.0),
+            Vec3::new(1.0, 2.0, 1.0),
+            ident,
+            yellow,
+            0.0,
+            true,
+            PartShape::BevelBlock,
+            PartMaterial::SmoothPlastic,
+            SurfaceType::Smooth,
+            SurfaceType::Smooth,
+            DecalKind::None,
+        );
         let r_arm = dm.parts.len();
-        dm.add_part("CharRightArm", spawn_pos + Vec3::new(1.5, 0.0, 0.0), Vec3::new(1.0, 2.0, 1.0), yellow, true);
+        dm.add_part_styled(
+            "CharRightArm",
+            spawn_pos + Vec3::new(1.5, 0.0, 0.0),
+            Vec3::new(1.0, 2.0, 1.0),
+            ident,
+            yellow,
+            0.0,
+            true,
+            PartShape::BevelBlock,
+            PartMaterial::SmoothPlastic,
+            SurfaceType::Smooth,
+            SurfaceType::Smooth,
+            DecalKind::None,
+        );
         let l_leg = dm.parts.len();
-        dm.add_part("CharLeftLeg", spawn_pos + Vec3::new(-0.5, -2.0, 0.0), Vec3::new(1.0, 2.0, 1.0), green, true);
+        dm.add_part_styled(
+            "CharLeftLeg",
+            spawn_pos + Vec3::new(-0.5, -2.0, 0.0),
+            Vec3::new(1.0, 2.0, 1.0),
+            ident,
+            green,
+            0.0,
+            true,
+            PartShape::BevelBlock,
+            PartMaterial::SmoothPlastic,
+            SurfaceType::Smooth,
+            SurfaceType::Smooth,
+            DecalKind::ClassicPants,
+        );
         let r_leg = dm.parts.len();
-        dm.add_part("CharRightLeg", spawn_pos + Vec3::new(0.5, -2.0, 0.0), Vec3::new(1.0, 2.0, 1.0), green, true);
+        dm.add_part_styled(
+            "CharRightLeg",
+            spawn_pos + Vec3::new(0.5, -2.0, 0.0),
+            Vec3::new(1.0, 2.0, 1.0),
+            ident,
+            green,
+            0.0,
+            true,
+            PartShape::BevelBlock,
+            PartMaterial::SmoothPlastic,
+            SurfaceType::Smooth,
+            SurfaceType::Smooth,
+            DecalKind::ClassicPants,
+        );
+        // 4 reusable 3D sub-parts for multi-part equipped tools (hidden when unequipped)
+        let mut tool_part_indices = [0usize; 4];
+        for (i, slot) in tool_part_indices.iter_mut().enumerate() {
+            *slot = dm.parts.len();
+            dm.add_part_styled(
+                format!("CharTool{i}"),
+                spawn_pos,
+                Vec3::splat(0.2),
+                ident,
+                [0.75, 0.80, 0.85],
+                1.0,
+                true,
+                PartShape::Block,
+                PartMaterial::Metal,
+                SurfaceType::Smooth,
+                SurfaceType::Smooth,
+                DecalKind::None,
+            );
+        }
 
         Self {
             spawn_pos,
@@ -99,11 +193,124 @@ impl CharacterState {
             yaw: 0.0,
             grounded: false,
             walk_phase: 0.0,
+            idle_time: 0.0,
+            health: 100.0,
             part_indices: [head, torso, l_arm, r_arm, l_leg, r_leg],
+            tool_part_indices,
         }
     }
 
-    fn step(&mut self, dt: f32, move_input: [f32; 2], jump: bool, cam_yaw: f32, dm: &mut DataModel) {
+    fn update_tool_parts(
+        &self,
+        base_pos: Vec3,
+        body_rot: Mat3,
+        active_tool: i32,
+        dm: &mut DataModel,
+    ) {
+        // Hide all 4 tool sub-parts by default
+        for &idx in &self.tool_part_indices {
+            if let Some(tp) = dm.parts.get_mut(idx) {
+                tp.transparency = 1.0;
+            }
+        }
+        if active_tool < 0 || (active_tool as usize) >= dm.tools.len() {
+            return;
+        }
+        let tool = dm.tools[active_tool as usize].clone();
+        // Hand anchor at the tip of the forward-raised right arm
+        let hand = Vec3::new(1.5, 0.8, -1.65);
+
+        let set_sub = |dm: &mut DataModel,
+                       slot: usize,
+                       local_off: Vec3,
+                       local_rot: Mat3,
+                       size: Vec3,
+                       color: [f32; 3],
+                       shape: PartShape,
+                       mat: PartMaterial| {
+            if let Some(tp) = dm.parts.get_mut(self.tool_part_indices[slot]) {
+                tp.position = base_pos + body_rot * (hand + local_off);
+                tp.rotation = (body_rot * local_rot).to_cols_array_2d();
+                tp.size = size;
+                tp.color = color;
+                tp.shape = shape;
+                tp.material = mat;
+                tp.transparency = 0.0;
+            }
+        };
+
+        match tool.icon {
+            ToolIconKind::Sword => {
+                // Classic LinkedSword: black grip + gold crossguard + silver blade + pointed tip
+                set_sub(dm, 0, Vec3::new(0.0, 0.0, -0.05), Mat3::IDENTITY, Vec3::new(0.22, 0.24, 0.85), [0.14, 0.14, 0.16], PartShape::Block, PartMaterial::SmoothPlastic);
+                set_sub(dm, 1, Vec3::new(0.0, 0.0, -0.52), Mat3::IDENTITY, Vec3::new(0.95, 0.24, 0.20), [0.88, 0.70, 0.16], PartShape::Block, PartMaterial::Metal);
+                set_sub(dm, 2, Vec3::new(0.0, 0.0, -2.05), Mat3::IDENTITY, Vec3::new(0.14, 0.30, 2.85), [0.78, 0.83, 0.88], PartShape::Block, PartMaterial::Metal);
+                set_sub(dm, 3, Vec3::new(0.0, 0.0, -3.72), Mat3::from_rotation_y(std::f32::consts::FRAC_PI_2), Vec3::new(0.50, 0.30, 0.14), [0.82, 0.87, 0.92], PartShape::Wedge, PartMaterial::Metal);
+            }
+            ToolIconKind::Slingshot => {
+                // Classic Wooden Y-Fork Slingshot + red elastic band
+                let wood = [0.46, 0.27, 0.12];
+                set_sub(dm, 0, Vec3::new(0.0, 0.15, -0.15), Mat3::IDENTITY, Vec3::new(0.24, 0.95, 0.24), wood, PartShape::Block, PartMaterial::Wood);
+                set_sub(dm, 1, Vec3::new(-0.32, 0.85, -0.15), Mat3::from_rotation_z(0.42), Vec3::new(0.20, 0.85, 0.22), wood, PartShape::Block, PartMaterial::Wood);
+                set_sub(dm, 2, Vec3::new(0.32, 0.85, -0.15), Mat3::from_rotation_z(-0.42), Vec3::new(0.20, 0.85, 0.22), wood, PartShape::Block, PartMaterial::Wood);
+                set_sub(dm, 3, Vec3::new(0.0, 1.15, -0.15), Mat3::IDENTITY, Vec3::new(0.95, 0.10, 0.10), [0.80, 0.18, 0.14], PartShape::Block, PartMaterial::SmoothPlastic);
+            }
+            ToolIconKind::RocketLauncher => {
+                // Classic Olive Rocket Launcher tube + grip + red warhead + sight
+                let cyl_rot = Mat3::from_rotation_x(std::f32::consts::FRAC_PI_2);
+                set_sub(dm, 0, Vec3::new(0.0, 0.35, -0.75), cyl_rot, Vec3::new(0.72, 3.2, 0.72), [0.25, 0.35, 0.19], PartShape::Cylinder, PartMaterial::Metal);
+                set_sub(dm, 1, Vec3::new(0.0, -0.05, -0.15), Mat3::IDENTITY, Vec3::new(0.26, 0.70, 0.28), [0.18, 0.18, 0.20], PartShape::Block, PartMaterial::SmoothPlastic);
+                set_sub(dm, 2, Vec3::new(0.0, 0.35, -2.42), Mat3::IDENTITY, Vec3::new(0.56, 0.56, 0.56), [0.86, 0.16, 0.12], PartShape::Ball, PartMaterial::SmoothPlastic);
+                set_sub(dm, 3, Vec3::new(0.0, 0.76, -1.65), Mat3::IDENTITY, Vec3::new(0.14, 0.24, 0.22), [0.16, 0.16, 0.18], PartShape::Block, PartMaterial::Metal);
+            }
+            ToolIconKind::Trowel => {
+                // Classic Builder's Trowel: wooden handle + angled neck + wide flat metal blade
+                set_sub(dm, 0, Vec3::new(0.0, 0.0, -0.10), Mat3::IDENTITY, Vec3::new(0.24, 0.24, 0.90), [0.48, 0.28, 0.12], PartShape::Block, PartMaterial::Wood);
+                set_sub(dm, 1, Vec3::new(0.0, 0.0, -0.72), Mat3::IDENTITY, Vec3::new(0.16, 0.16, 0.45), [0.66, 0.70, 0.75], PartShape::Block, PartMaterial::Metal);
+                set_sub(dm, 2, Vec3::new(0.0, 0.0, -1.45), Mat3::IDENTITY, Vec3::new(0.85, 0.10, 1.15), [0.76, 0.80, 0.85], PartShape::Block, PartMaterial::Metal);
+            }
+            ToolIconKind::Bomb => {
+                // Classic Black Timebomb: round sphere + metal cap + fuse + glowing neon spark
+                set_sub(dm, 0, Vec3::new(0.0, 0.15, -0.45), Mat3::IDENTITY, Vec3::splat(1.25), [0.10, 0.10, 0.12], PartShape::Ball, PartMaterial::SmoothPlastic);
+                set_sub(dm, 1, Vec3::new(0.0, 0.80, -0.45), Mat3::IDENTITY, Vec3::new(0.32, 0.22, 0.32), [0.45, 0.47, 0.50], PartShape::Cylinder, PartMaterial::Metal);
+                set_sub(dm, 2, Vec3::new(0.0, 1.05, -0.45), Mat3::from_rotation_z(-0.35), Vec3::new(0.10, 0.45, 0.10), [0.58, 0.48, 0.34], PartShape::Block, PartMaterial::Fabric);
+                set_sub(dm, 3, Vec3::new(0.12, 1.28, -0.45), Mat3::IDENTITY, Vec3::splat(0.26), [1.0, 0.58, 0.08], PartShape::Ball, PartMaterial::Neon);
+            }
+            ToolIconKind::Superball => {
+                // Classic Glossy Bright Red Superball
+                set_sub(dm, 0, Vec3::new(0.0, 0.15, -0.45), Mat3::IDENTITY, Vec3::splat(1.35), tool.handle_color, PartShape::Ball, PartMaterial::SmoothPlastic);
+            }
+            ToolIconKind::Generic => {
+                let reach = (tool.handle_size.z * 0.45).max(0.4);
+                set_sub(dm, 0, Vec3::new(0.0, 0.0, -reach), Mat3::IDENTITY, tool.handle_size, tool.handle_color, tool.handle_shape, PartMaterial::SmoothPlastic);
+            }
+        }
+    }
+
+    pub fn sync_equipped_tool(&self, active_tool: i32, dm: &mut DataModel) {
+        let body_rot = Mat3::from_rotation_y(-self.yaw);
+        let has_tool = active_tool >= 0 && (active_tool as usize) < dm.tools.len();
+        if has_tool {
+            // Raise right arm forward 90 degrees in classic Roblox tool-hold pose
+            let arm_rot = Mat3::from_rotation_x(std::f32::consts::FRAC_PI_2);
+            let world_arm_rot = body_rot * arm_rot;
+            if let Some(arm) = dm.parts.get_mut(self.part_indices[3]) {
+                arm.position = self.pos + body_rot * (Vec3::new(1.5, 0.8, 0.0) + arm_rot * Vec3::new(0.0, -0.8, 0.0));
+                arm.rotation = world_arm_rot.to_cols_array_2d();
+            }
+        }
+        self.update_tool_parts(self.pos, body_rot, active_tool, dm);
+    }
+
+    fn step(
+        &mut self,
+        dt: f32,
+        move_input: [f32; 2],
+        jump: bool,
+        cam_yaw: f32,
+        active_tool: i32,
+        dm: &mut DataModel,
+    ) {
         let forward = Vec3::new(cam_yaw.sin(), 0.0, -cam_yaw.cos());
         let right = Vec3::new(cam_yaw.cos(), 0.0, cam_yaw.sin());
         let wish = forward * move_input[1] + right * move_input[0];
@@ -136,6 +343,7 @@ impl CharacterState {
         self.vel.y -= 58.0 * dt;
 
         let prev_feet = self.pos.y - 3.0;
+        let pre_land_vy = self.vel.y;
         self.pos += self.vel * dt;
         self.grounded = false;
 
@@ -166,29 +374,60 @@ impl CharacterState {
             }
         }
         if let Some(gy) = best_y {
+            if pre_land_vy < -52.0 {
+                let dmg = ((-pre_land_vy - 52.0) * 1.4).min(65.0);
+                self.health = (self.health - dmg).max(0.0);
+            }
             self.pos.y = gy + 3.0;
             self.vel.y = 0.0;
             self.grounded = true;
         }
 
-        if self.pos.y < -150.0 {
+        // Slow classic Roblox health regeneration
+        if self.health > 0.0 && self.health < 100.0 {
+            self.health = (self.health + dt * 1.5).min(100.0);
+        }
+
+        if self.pos.y < -150.0 || self.health <= 0.0 {
             self.pos = self.spawn_pos;
             self.vel = Vec3::ZERO;
+            self.health = 100.0;
         }
 
         // Classic R6 joint-pivot animation (rotates limbs around shoulders & hips)
+        self.idle_time += dt;
         let body_rot = Mat3::from_rotation_y(-self.yaw);
+        let idle_sway = (self.idle_time * 2.2).sin() * 0.055;
         let limb_angle = if !self.grounded {
             0.0
         } else if moving {
             self.walk_phase.sin() * 0.65
         } else {
+            idle_sway
+        };
+        let has_tool = active_tool >= 0 && (active_tool as usize) < dm.tools.len();
+        let arm_l_angle = if !self.grounded { 2.4 } else { -limb_angle };
+        let arm_r_angle = if has_tool {
+            std::f32::consts::FRAC_PI_2
+        } else if !self.grounded {
+            2.4
+        } else {
+            limb_angle
+        };
+        let leg_l_angle = if !self.grounded {
+            0.2
+        } else if moving {
+            limb_angle
+        } else {
             0.0
         };
-        let arm_l_angle = if !self.grounded { 2.4 } else { -limb_angle };
-        let arm_r_angle = if !self.grounded { 2.4 } else { limb_angle };
-        let leg_l_angle = if !self.grounded { 0.2 } else { limb_angle };
-        let leg_r_angle = if !self.grounded { -0.2 } else { -limb_angle };
+        let leg_r_angle = if !self.grounded {
+            -0.2
+        } else if moving {
+            -limb_angle
+        } else {
+            0.0
+        };
 
         let bob = if moving && self.grounded {
             (self.walk_phase * 2.0).sin().abs() * 0.12
@@ -215,41 +454,67 @@ impl CharacterState {
         // Left & Right Legs (pivot at hip y=-1.0)
         set_limb(dm, self.part_indices[4], Vec3::new(-0.5, -1.0, 0.0), Vec3::new(0.0, -1.0, 0.0), leg_l_angle);
         set_limb(dm, self.part_indices[5], Vec3::new(0.5, -1.0, 0.0), Vec3::new(0.0, -1.0, 0.0), leg_r_angle);
+
+        self.update_tool_parts(base_pos, body_rot, active_tool, dm);
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn now_secs() -> f64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    START.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn now_secs() -> f64 {
+    web_sys::window()
+        .and_then(|w| w.performance())
+        .map(|p| p.now() / 1000.0)
+        .unwrap_or(0.0)
 }
 
 pub struct ClientApp {
     session: ClientSession,
     character: CharacterState,
     gpu: Option<GpuState>,
+    #[cfg(target_arch = "wasm32")]
+    pending_gpu: std::rc::Rc<std::cell::RefCell<Option<GpuState>>>,
     cam_yaw: f32,
     cam_pitch: f32,
     keys: [bool; 4], // W, S, A, D
+    active_tool: i32,
     jump_requested: bool,
+    mouse_down: bool,
+    last_cursor: Option<(f64, f64)>,
     jump_touch: Option<u64>,
     move_touch: Option<(u64, f64, f64, f64, f64)>,
-    cam_touch: Option<(u64, f64, f64, std::time::Instant)>,
-    start_time: std::time::Instant,
-    last_tick: std::time::Instant,
+    cam_touch: Option<(u64, f64, f64, f64)>,
+    start_time_secs: f64,
+    last_tick_secs: f64,
 }
 
 impl ClientApp {
     pub fn new(mut session: ClientSession) -> Self {
         let character = CharacterState::spawn(&mut session.data_model);
-        let now = std::time::Instant::now();
+        let now = now_secs();
         Self {
             session,
             character,
             gpu: None,
+            #[cfg(target_arch = "wasm32")]
+            pending_gpu: std::rc::Rc::new(std::cell::RefCell::new(None)),
             cam_yaw: 0.0,
             cam_pitch: 0.28,
             keys: [false; 4],
+            active_tool: 0,
             jump_requested: false,
+            mouse_down: false,
+            last_cursor: None,
             jump_touch: None,
             move_touch: None,
             cam_touch: None,
-            start_time: now,
-            last_tick: now,
+            start_time_secs: now,
+            last_tick_secs: now,
         }
     }
 
@@ -258,9 +523,20 @@ impl ClientApp {
         self.cam_pitch = 0.28;
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn run(mut self) -> anyhow::Result<()> {
         let event_loop = EventLoop::new()?;
         event_loop.run_app(&mut self)?;
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn run_wasm(self) -> Result<(), wasm_bindgen::JsValue> {
+        use winit::platform::web::EventLoopExtWebSys;
+        console_error_panic_hook::set_once();
+        let event_loop = EventLoop::new()
+            .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("event loop error: {e}")))?;
+        event_loop.spawn_app(self);
         Ok(())
     }
 
@@ -274,6 +550,29 @@ impl ClientApp {
         event_loop.run_app(&mut self)?;
         Ok(())
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn start_baseplate() -> Result<(), wasm_bindgen::JsValue> {
+    let mut session = ClientSession::offline_baseplate();
+    let _ = session.data_model.run_luau_scripts_mut();
+    session.physics = PhysicsWorld::from_data_model(&session.data_model);
+    let mut client = ClientApp::new(session);
+    client.auto_frame_camera();
+    client.run_wasm()
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn start_place_bytes(bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
+    let mut session = ClientSession::from_place_bytes(bytes)
+        .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("failed to parse place: {e:#}")))?;
+    let _ = session.data_model.run_luau_scripts_mut();
+    session.physics = PhysicsWorld::from_data_model(&session.data_model);
+    let mut client = ClientApp::new(session);
+    client.auto_frame_camera();
+    client.run_wasm()
 }
 
 #[cfg(target_os = "android")]
@@ -404,9 +703,67 @@ impl ApplicationHandler for ClientApp {
 
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = size;
-            // On wasm32, surface/adapter/device are initialized asynchronously via wasm_bindgen_futures::spawn_local.
-            let _ = window;
+            let pending = self.pending_gpu.clone();
+            let win_clone = window.clone();
+            let w = size.width.max(1);
+            let h = size.height.max(1);
+            wasm_bindgen_futures::spawn_local(async move {
+                let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                    backends: wgpu::Backends::GL | wgpu::Backends::BROWSER_WEBGPU,
+                    ..Default::default()
+                });
+                let Ok(surface) = instance.create_surface(win_clone.clone()) else {
+                    return;
+                };
+                let Some(adapter) = instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        compatible_surface: Some(&surface),
+                        power_preference: wgpu::PowerPreference::HighPerformance,
+                        force_fallback_adapter: false,
+                    })
+                    .await
+                else {
+                    return;
+                };
+                let desc = wgpu::DeviceDescriptor {
+                    required_limits: wgpu::Limits::downlevel_webgl2_defaults()
+                        .using_resolution(adapter.limits()),
+                    ..Default::default()
+                };
+                let Ok((device, queue)) = adapter.request_device(&desc, None).await else {
+                    return;
+                };
+                let caps = surface.get_capabilities(&adapter);
+                let Some(format) = caps.formats.first().copied() else {
+                    return;
+                };
+                let Some(alpha_mode) = caps.alpha_modes.first().copied() else {
+                    return;
+                };
+                let config = wgpu::SurfaceConfiguration {
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    format,
+                    width: w,
+                    height: h,
+                    present_mode: wgpu::PresentMode::Fifo,
+                    alpha_mode,
+                    view_formats: vec![],
+                    desired_maximum_frame_latency: 2,
+                };
+                surface.configure(&device, &config);
+                let depth_view = PartPipeline::create_depth_view(&device, config.width, config.height);
+                let pipeline = PartPipeline::new(&device, format);
+                *pending.borrow_mut() = Some(GpuState {
+                    window: win_clone.clone(),
+                    surface,
+                    device,
+                    queue,
+                    config,
+                    depth_view,
+                    pipeline,
+                });
+                win_clone.request_redraw();
+            });
         }
     }
 
@@ -415,6 +772,12 @@ impl ApplicationHandler for ClientApp {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        #[cfg(target_arch = "wasm32")]
+        if self.gpu.is_none() {
+            if let Some(g) = self.pending_gpu.borrow_mut().take() {
+                self.gpu = Some(g);
+            }
+        }
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(new_size) => {
@@ -427,6 +790,23 @@ impl ApplicationHandler for ClientApp {
                         gpu.config.width,
                         gpu.config.height,
                     );
+                }
+            }
+            WindowEvent::MouseInput { state, .. } => {
+                self.mouse_down = state == ElementState::Pressed;
+                if !self.mouse_down {
+                    self.last_cursor = None;
+                }
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                if self.mouse_down {
+                    if let Some((lx, ly)) = self.last_cursor {
+                        let dx = (position.x - lx) as f32;
+                        let dy = (position.y - ly) as f32;
+                        self.cam_yaw += dx * 0.006;
+                        self.cam_pitch = (self.cam_pitch + dy * 0.0045).clamp(-0.25, 1.15);
+                    }
+                    self.last_cursor = Some((position.x, position.y));
                 }
             }
             WindowEvent::KeyboardInput {
@@ -447,6 +827,12 @@ impl ApplicationHandler for ClientApp {
                     KeyCode::Space if pressed => self.jump_requested = true,
                     KeyCode::ArrowLeft | KeyCode::KeyQ if pressed => self.cam_yaw -= 0.12,
                     KeyCode::ArrowRight | KeyCode::KeyE if pressed => self.cam_yaw += 0.12,
+                    KeyCode::Digit1 if pressed => self.active_tool = if self.active_tool == 0 { -1 } else { 0 },
+                    KeyCode::Digit2 if pressed => self.active_tool = if self.active_tool == 1 { -1 } else { 1 },
+                    KeyCode::Digit3 if pressed => self.active_tool = if self.active_tool == 2 { -1 } else { 2 },
+                    KeyCode::Digit4 if pressed => self.active_tool = if self.active_tool == 3 { -1 } else { 3 },
+                    KeyCode::Digit5 if pressed => self.active_tool = if self.active_tool == 4 { -1 } else { 4 },
+                    KeyCode::Digit6 if pressed => self.active_tool = if self.active_tool == 5 { -1 } else { 5 },
                     _ => {}
                 }
             }
@@ -483,7 +869,7 @@ impl ApplicationHandler for ClientApp {
                                 touch.id,
                                 touch.location.x,
                                 touch.location.y,
-                                std::time::Instant::now(),
+                                now_secs(),
                             ));
                         }
                     }
@@ -559,6 +945,10 @@ impl ApplicationHandler for ClientApp {
                             || self.cam_touch.is_some()
                             || self.jump_touch.is_some();
 
+                        let mut tool_icons = [0u32; 6];
+                        for (i, t) in self.session.data_model.tools.iter().take(6).enumerate() {
+                            tool_icons[i] = t.icon as u32;
+                        }
                         let hud = HudState {
                             show_touch_hud,
                             stick_center_uv: stick_uv,
@@ -567,9 +957,13 @@ impl ApplicationHandler for ClientApp {
                             jump_pressed: self.jump_touch.is_some(),
                             screen_width: w,
                             screen_height: h,
+                            health: (self.character.health / 100.0).clamp(0.0, 1.0),
+                            tool_count: self.session.data_model.tools.len().min(6) as u32,
+                            active_tool: self.active_tool,
+                            tool_icons,
                         };
 
-                        let time_secs = self.start_time.elapsed().as_secs_f32();
+                        let time_secs = (now_secs() - self.start_time_secs) as f32;
                         let uniform = build_frame_uniform(
                             cam_pos,
                             target,
@@ -586,7 +980,7 @@ impl ApplicationHandler for ClientApp {
                             &gpu.depth_view,
                             &self.session.data_model.parts,
                             uniform,
-                            show_touch_hud,
+                            true,
                         );
                         frame.present();
                     }
@@ -597,13 +991,19 @@ impl ApplicationHandler for ClientApp {
     }
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
-        let now = std::time::Instant::now();
-        let elapsed = now.duration_since(self.last_tick);
-        if elapsed < std::time::Duration::from_millis(16) {
+        #[cfg(target_arch = "wasm32")]
+        if self.gpu.is_none() {
+            if let Some(g) = self.pending_gpu.borrow_mut().take() {
+                self.gpu = Some(g);
+            }
+        }
+        let now = now_secs();
+        let elapsed = now - self.last_tick_secs;
+        if elapsed < 0.016 {
             return;
         }
-        let dt = elapsed.as_secs_f32().min(1.0 / 30.0);
-        self.last_tick = now;
+        let dt = (elapsed as f32).min(1.0 / 30.0);
+        self.last_tick_secs = now;
 
         let mut move_x = (self.keys[3] as i32 - self.keys[2] as i32) as f32;
         let mut move_z = (self.keys[0] as i32 - self.keys[1] as i32) as f32;
@@ -622,8 +1022,14 @@ impl ApplicationHandler for ClientApp {
         }
 
         let jump = std::mem::take(&mut self.jump_requested) || self.jump_touch.is_some();
-        self.character
-            .step(dt, [move_x, move_z], jump, self.cam_yaw, &mut self.session.data_model);
+        self.character.step(
+            dt,
+            [move_x, move_z],
+            jump,
+            self.cam_yaw,
+            self.active_tool,
+            &mut self.session.data_model,
+        );
         self.session
             .physics
             .step(dt, &mut self.session.data_model);

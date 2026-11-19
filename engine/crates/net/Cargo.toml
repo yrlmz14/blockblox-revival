@@ -8,4 +8,4 @@ license.workspace = true
 glam.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-revival-core = { path = "../core" }
+revival-core = { path = "../core", default-features = false }

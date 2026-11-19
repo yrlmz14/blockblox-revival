@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use revival_client::{renderer::render_offscreen_png, ClientApp, ClientSession};
+use revival_client::{renderer::render_offscreen_png, CharacterState, ClientApp, ClientSession};
 
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -15,35 +15,26 @@ fn main() -> anyhow::Result<()> {
             println!("loading place {place_path}...");
             ClientSession::from_place_bytes(&bytes)?
         } else {
-            let mut s = ClientSession::offline_baseplate();
-            s.data_model.add_part(
-                "BlueArch",
-                glam::Vec3::new(-6.0, 2.0, -6.0),
-                glam::Vec3::new(6.0, 4.0, 2.0),
-                [0.2, 0.45, 0.9],
-                true,
-            );
-            s.data_model.add_part(
-                "YellowTower",
-                glam::Vec3::new(8.0, 4.0, -8.0),
-                glam::Vec3::new(3.0, 8.0, 3.0),
-                [0.95, 0.8, 0.15],
-                true,
-            );
-            s
+            ClientSession::offline_baseplate()
         };
         for line in session.data_model.run_luau_scripts_mut()? {
             println!("{line}");
         }
+        let character = CharacterState::spawn(&mut session.data_model);
+        if !session.data_model.tools.is_empty() {
+            character.sync_equipped_tool(0, &mut session.data_model);
+        }
         println!(
-            "rendering {} parts (skybox_up={:?}, sun={:?})...",
+            "rendering {} parts, {} tools (skybox_up={:?}, sun={:?})...",
             session.data_model.parts.len(),
+            session.data_model.tools.len(),
             session.data_model.sky.skybox_up,
             session.data_model.sky.sun_direction
         );
         render_offscreen_png(
             &session.data_model.parts,
             &session.data_model.sky,
+            &session.data_model.tools,
             960,
             540,
             &out_path,

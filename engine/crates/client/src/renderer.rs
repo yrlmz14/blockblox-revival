@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec3};
-use revival_core::{Part, PartShape, SkyConfig};
+use revival_core::{Part, PartShape, SkyConfig, ToolItem};
 use wgpu::util::DeviceExt;
 
 #[repr(C)]
@@ -19,6 +19,7 @@ pub struct PartInstance {
     pub rot_x: [f32; 3],
     pub rot_y: [f32; 3],
     pub rot_z: [f32; 3],
+    pub mat_params: [f32; 4],
 }
 
 #[repr(C)]
@@ -27,7 +28,7 @@ pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
 }
 
-#[derive(Copy, Clone, Default)]
+#[derive(Copy, Clone)]
 pub struct HudState {
     pub show_touch_hud: bool,
     pub stick_center_uv: [f32; 2],
@@ -36,6 +37,28 @@ pub struct HudState {
     pub jump_pressed: bool,
     pub screen_width: f32,
     pub screen_height: f32,
+    pub health: f32,
+    pub tool_count: u32,
+    pub active_tool: i32,
+    pub tool_icons: [u32; 6],
+}
+
+impl Default for HudState {
+    fn default() -> Self {
+        Self {
+            show_touch_hud: false,
+            stick_center_uv: [0.14, 0.78],
+            stick_knob_norm: [0.0, 0.0],
+            stick_active: false,
+            jump_pressed: false,
+            screen_width: 960.0,
+            screen_height: 540.0,
+            health: 1.0,
+            tool_count: 0,
+            active_tool: -1,
+            tool_icons: [0; 6],
+        }
+    }
 }
 
 #[repr(C)]
@@ -51,10 +74,15 @@ pub struct FrameUniform {
     pub ambient: [f32; 4],
     pub hud_stick: [f32; 4],
     pub hud_screen: [f32; 4],
+    pub hud_core: [f32; 4],
+    pub fog_params: [f32; 4],
+    pub hud_tools_a: [f32; 4],
+    pub hud_tools_b: [f32; 4],
 }
 
 impl PartInstance {
     pub fn from_part(p: &Part) -> Self {
+        let surf_packed = (p.top_surface as u32) + (p.bottom_surface as u32) * 16;
         Self {
             pos: p.position.to_array(),
             size: p.size.to_array(),
@@ -62,6 +90,12 @@ impl PartInstance {
             rot_x: p.rotation[0],
             rot_y: p.rotation[1],
             rot_z: p.rotation[2],
+            mat_params: [
+                p.material as u32 as f32,
+                surf_packed as f32,
+                p.decal as u32 as f32,
+                (1.0 - p.transparency).clamp(0.0, 1.0),
+            ],
         }
     }
 }
@@ -102,6 +136,9 @@ pub fn build_frame_uniform(
     let light_proj = Mat4::orthographic_rh(-110.0, 110.0, -110.0, 110.0, 10.0, 380.0);
     let light_vp = light_proj * light_view;
 
+    let fog_start = sky.fog_start.max(260.0);
+    let fog_end = sky.fog_end.max(fog_start + 400.0);
+
     FrameUniform {
         view_proj: vp.to_cols_array_2d(),
         inv_view_proj: inv_vp.to_cols_array_2d(),
@@ -109,7 +146,7 @@ pub fn build_frame_uniform(
         camera_pos: [eye.x, eye.y, eye.z, 1.0],
         sun_dir: [sun.x, sun.y, sun.z, sky.brightness],
         sky_top: [sky.sky_top[0], sky.sky_top[1], sky.sky_top[2], time_secs],
-        sky_bottom: [sky.sky_bottom[0], sky.sky_bottom[1], sky.sky_bottom[2], 520.0],
+        sky_bottom: [sky.sky_bottom[0], sky.sky_bottom[1], sky.sky_bottom[2], fog_end],
         ambient: [sky.ambient[0], sky.ambient[1], sky.ambient[2], 1.0],
         hud_stick: [
             hud.stick_center_uv[0],
@@ -122,6 +159,25 @@ pub fn build_frame_uniform(
             hud.screen_height,
             if hud.stick_active { 1.0 } else { 0.0 },
             if hud.jump_pressed { 1.0 } else { 0.0 },
+        ],
+        hud_core: [
+            hud.health.clamp(0.0, 1.0),
+            hud.tool_count.min(6) as f32,
+            hud.active_tool as f32,
+            if hud.show_touch_hud { 1.0 } else { 0.0 },
+        ],
+        fog_params: [fog_start, fog_end, 0.0, 0.0],
+        hud_tools_a: [
+            hud.tool_icons[0] as f32,
+            hud.tool_icons[1] as f32,
+            hud.tool_icons[2] as f32,
+            hud.tool_icons[3] as f32,
+        ],
+        hud_tools_b: [
+            hud.tool_icons[4] as f32,
+            hud.tool_icons[5] as f32,
+            0.0,
+            0.0,
         ],
     }
 }
@@ -287,6 +343,122 @@ fn unit_cylinder_vertices() -> (Vec<Vertex>, Vec<u16>) {
     (verts, inds)
 }
 
+/// Authentic beveled classic Roblox R6 Head mesh (lathe profile with rounded top & bottom bevels).
+fn unit_roblox_head_vertices() -> (Vec<Vertex>, Vec<u16>) {
+    let segs = 24_u16;
+    // (radius, y, nr, ny) profile from bottom center to top center
+    let profile: [(f32, f32, f32, f32); 10] = [
+        (0.00, -0.50, 0.00, -1.00),
+        (0.32, -0.50, 0.00, -1.00),
+        (0.42, -0.46, 0.55, -0.84),
+        (0.49, -0.37, 0.90, -0.44),
+        (0.50, -0.26, 1.00,  0.00),
+        (0.50,  0.26, 1.00,  0.00),
+        (0.49,  0.37, 0.90,  0.44),
+        (0.42,  0.46, 0.55,  0.84),
+        (0.32,  0.50, 0.00,  1.00),
+        (0.00,  0.50, 0.00,  1.00),
+    ];
+
+    let mut verts = Vec::new();
+    let mut inds = Vec::new();
+    let rings = profile.len() as u16;
+    let stride = segs + 1;
+
+    for &(r, y, nr, ny) in &profile {
+        for j in 0..=segs {
+            let a = std::f32::consts::TAU * (j as f32 / segs as f32);
+            let (s, c) = a.sin_cos();
+            let n = Vec3::new(nr * c, ny, nr * s).normalize_or_zero();
+            verts.push(Vertex {
+                position: [r * c, y, r * s],
+                normal: n.to_array(),
+            });
+        }
+    }
+
+    for i in 0..(rings - 1) {
+        for j in 0..segs {
+            let a = i * stride + j;
+            let b = a + stride;
+            let c = b + 1;
+            let d = a + 1;
+            inds.extend_from_slice(&[a, b, d, d, b, c]);
+        }
+    }
+    (verts, inds)
+}
+
+/// Classic Roblox R6 beveled block mesh (chamfered edges & corners for smooth torso/arms/legs).
+fn unit_bevel_block_vertices() -> (Vec<Vertex>, Vec<u16>) {
+    // Subdivided rounded/beveled cube: take a 3x3x3 grid per face and push corners inward by bevel b
+    let b = 0.075_f32;
+    let h = 0.5_f32;
+    let inner = h - b;
+    let mut verts = Vec::new();
+    let mut inds = Vec::new();
+
+    // Helper to project a cube point onto a smooth beveled box and compute outward normal
+    let eval = |p: Vec3| -> (Vec3, Vec3) {
+        let clamped = p.clamp(Vec3::splat(-inner), Vec3::splat(inner));
+        let delta = p - clamped;
+        let len = delta.length();
+        if len > 1e-5 {
+            let n = delta / len;
+            (clamped + n * b, n)
+        } else {
+            let ap = p.abs();
+            let n = if ap.x >= ap.y && ap.x >= ap.z {
+                Vec3::new(p.x.signum(), 0.0, 0.0)
+            } else if ap.y >= ap.x && ap.y >= ap.z {
+                Vec3::new(0.0, p.y.signum(), 0.0)
+            } else {
+                Vec3::new(0.0, 0.0, p.z.signum())
+            };
+            (p, n)
+        }
+    };
+
+    // Sample positions along each axis to capture sharp flat centers + smooth chamfered edges
+    let coords = [-h, -inner, inner, h];
+    let n_pts = coords.len() as u16;
+
+    // 6 faces: (axis_u, axis_v, face_n)
+    let faces: [(Vec3, Vec3, Vec3); 6] = [
+        (Vec3::X, Vec3::Y, Vec3::Z),     // +Z
+        (-Vec3::X, Vec3::Y, -Vec3::Z),   // -Z
+        (Vec3::X, -Vec3::Z, Vec3::Y),    // +Y
+        (Vec3::X, Vec3::Z, -Vec3::Y),    // -Y
+        (-Vec3::Z, Vec3::Y, Vec3::X),    // +X
+        (Vec3::Z, Vec3::Y, -Vec3::X),    // -X
+    ];
+
+    for (u_axis, v_axis, n_axis) in faces {
+        let base = verts.len() as u16;
+        for &v in &coords {
+            for &u in &coords {
+                let raw = n_axis * h + u_axis * u + v_axis * v;
+                let (pos, norm) = eval(raw);
+                verts.push(Vertex {
+                    position: pos.to_array(),
+                    normal: norm.to_array(),
+                });
+            }
+        }
+        for row in 0..(n_pts - 1) {
+            for col in 0..(n_pts - 1) {
+                let a = base + row * n_pts + col;
+                let b_i = a + 1;
+                let c = a + n_pts + 1;
+                let d = a + n_pts;
+                inds.extend_from_slice(&[a, b_i, c, c, d, a]);
+            }
+        }
+    }
+
+    (verts, inds)
+}
+
 struct MeshGpu {
     vertex_buf: wgpu::Buffer,
     index_buf: wgpu::Buffer,
@@ -313,19 +485,27 @@ impl MeshGpu {
     }
 }
 
+const SHAPE_COUNT: usize = 6;
+
 pub struct PartPipeline {
     shadow_pipeline: wgpu::RenderPipeline,
     sky_pipeline: wgpu::RenderPipeline,
     part_pipeline: wgpu::RenderPipeline,
+    transparent_pipeline: wgpu::RenderPipeline,
     hud_pipeline: wgpu::RenderPipeline,
-    meshes: [MeshGpu; 4], // Block, Wedge, Ball, Cylinder
+    meshes: [MeshGpu; SHAPE_COUNT], // Block, Wedge, Ball, Cylinder, Head, BevelBlock
     frame_buf: wgpu::Buffer,
     frame_bind_group: wgpu::BindGroup,
     shadow_view: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
+    skybox_sampler: wgpu::Sampler,
+    shadow_bgl: wgpu::BindGroupLayout,
     shadow_bind_group: wgpu::BindGroup,
+    has_cubemap: bool,
     instance_buf: wgpu::Buffer,
     instance_capacity: usize,
-    shape_buckets: [Vec<PartInstance>; 4],
+    opaque_buckets: [Vec<PartInstance>; SHAPE_COUNT],
+    trans_buckets: [Vec<PartInstance>; SHAPE_COUNT],
     merged_instances: Vec<PartInstance>,
 }
 
@@ -337,11 +517,15 @@ impl PartPipeline {
         let (w_v, w_i) = unit_wedge_vertices();
         let (s_v, s_i) = unit_sphere_vertices();
         let (y_v, y_i) = unit_cylinder_vertices();
+        let (h_v, h_i) = unit_roblox_head_vertices();
+        let (b_v, b_i) = unit_bevel_block_vertices();
         let meshes = [
             MeshGpu::new(device, "mesh-block", &c_v, &c_i),
             MeshGpu::new(device, "mesh-wedge", &w_v, &w_i),
             MeshGpu::new(device, "mesh-ball", &s_v, &s_i),
             MeshGpu::new(device, "mesh-cylinder", &y_v, &y_i),
+            MeshGpu::new(device, "mesh-head", &h_v, &h_i),
+            MeshGpu::new(device, "mesh-bevel-block", &b_v, &b_i),
         ];
 
         let init_uniform = build_frame_uniform(
@@ -407,8 +591,37 @@ impl PartPipeline {
             ..Default::default()
         });
 
+        let skybox_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("skybox-sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        let dummy_cube = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("skybox-dummy-cube"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let dummy_cube_view = dummy_cube.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+
         let shadow_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("shadow-bgl"),
+            label: Some("env-bgl"),
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
@@ -426,11 +639,27 @@ impl PartPipeline {
                     ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
                     count: None,
                 },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::Cube,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
             ],
         });
 
         let shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shadow-bg"),
+            label: Some("env-bg"),
             layout: &shadow_bgl,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -440,6 +669,14 @@ impl PartPipeline {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::Sampler(&shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&dummy_cube_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&skybox_sampler),
                 },
             ],
         });
@@ -459,7 +696,8 @@ impl PartPipeline {
                     4 => Float32x3,
                     5 => Float32x3,
                     6 => Float32x3,
-                    7 => Float32x3
+                    7 => Float32x3,
+                    8 => Float32x4
                 ],
             },
         ];
@@ -508,10 +746,10 @@ impl PartPipeline {
             cache: None,
         });
 
-        // 2. Skybox pipeline
+        // 2. Skybox pipeline (samples GPU .rbxl cubemap or procedural sky)
         let sky_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("sky-pipeline"),
-            layout: Some(&frame_only_layout),
+            layout: Some(&part_layout),
             vertex: wgpu::VertexState {
                 module: &shader,
                 entry_point: Some("vs_sky"),
@@ -578,6 +816,43 @@ impl PartPipeline {
             cache: None,
         });
 
+        // 3b. Transparent part pipeline (Glass, Water, semi-transparent parts)
+        let transparent_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("transparent-part-pipeline"),
+            layout: Some(&part_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &vertex_buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: false,
+                depth_compare: wgpu::CompareFunction::Less,
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
+
         // 4. Mobile HUD overlay pipeline (alpha blended, no depth)
         let hud_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
             label: Some("hud-pipeline"),
@@ -623,17 +898,127 @@ impl PartPipeline {
             shadow_pipeline,
             sky_pipeline,
             part_pipeline,
+            transparent_pipeline,
             hud_pipeline,
             meshes,
             frame_buf,
             frame_bind_group,
             shadow_view,
+            shadow_sampler,
+            skybox_sampler,
+            shadow_bgl,
             shadow_bind_group,
+            has_cubemap: false,
             instance_buf,
             instance_capacity,
-            shape_buckets: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            opaque_buckets: std::array::from_fn(|_| Vec::new()),
+            trans_buckets: std::array::from_fn(|_| Vec::new()),
             merged_instances: Vec::with_capacity(instance_capacity),
         }
+    }
+
+    /// Fetch and upload a `.rbxl` place's 6-face Skybox cubemap onto the GPU.
+    pub fn load_skybox(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        sky: &SkyConfig,
+    ) -> bool {
+        let Some(cubemap) = SkyboxCubemap::from_sky_config(sky) else {
+            return false;
+        };
+        let face_size = cubemap.rt.width.min(cubemap.rt.height).max(1);
+        let faces = [
+            &cubemap.rt, // +X
+            &cubemap.lf, // -X
+            &cubemap.up, // +Y
+            &cubemap.dn, // -Y
+            &cubemap.bk, // +Z
+            &cubemap.ft, // -Z
+        ];
+        let cube_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("skybox-cube"),
+            size: wgpu::Extent3d {
+                width: face_size,
+                height: face_size,
+                depth_or_array_layers: 6,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        for (layer, face) in faces.iter().enumerate() {
+            // Resample nearest if a face has different dimensions than face_size
+            let mut buf = Vec::with_capacity((face_size * face_size * 4) as usize);
+            if face.width == face_size && face.height == face_size {
+                buf.extend_from_slice(&face.rgba[..(face_size * face_size * 4) as usize]);
+            } else {
+                for y in 0..face_size {
+                    let v = (y as f32 + 0.5) / face_size as f32;
+                    for x in 0..face_size {
+                        let u = (x as f32 + 0.5) / face_size as f32;
+                        let [r, g, b] = face.sample(u, v);
+                        buf.extend_from_slice(&[r, g, b, 255]);
+                    }
+                }
+            }
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &cube_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: 0,
+                        z: layer as u32,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &buf,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(face_size * 4),
+                    rows_per_image: Some(face_size),
+                },
+                wgpu::Extent3d {
+                    width: face_size,
+                    height: face_size,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        let cube_view = cube_tex.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+        self.shadow_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("env-bg-skybox"),
+            layout: &self.shadow_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.shadow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&cube_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&self.skybox_sampler),
+                },
+            ],
+        });
+        self.has_cubemap = true;
+        true
     }
 
     pub fn create_depth_view(device: &wgpu::Device, width: u32, height: u32) -> wgpu::TextureView {
@@ -661,36 +1046,57 @@ impl PartPipeline {
         color_view: &wgpu::TextureView,
         depth_view: &wgpu::TextureView,
         parts: &[Part],
-        frame: FrameUniform,
+        mut frame: FrameUniform,
         draw_hud: bool,
     ) {
+        frame.fog_params[2] = if self.has_cubemap { 1.0 } else { 0.0 };
         queue.write_buffer(&self.frame_buf, 0, bytemuck::bytes_of(&frame));
 
-        for b in &mut self.shape_buckets {
+        for b in &mut self.opaque_buckets {
+            b.clear();
+        }
+        for b in &mut self.trans_buckets {
             b.clear();
         }
         for p in parts {
-            if p.transparency < 0.95 {
-                let idx = match p.shape {
-                    PartShape::Block => 0,
-                    PartShape::Wedge => 1,
-                    PartShape::Ball => 2,
-                    PartShape::Cylinder => 3,
-                };
-                self.shape_buckets[idx].push(PartInstance::from_part(p));
+            if p.transparency >= 0.98 {
+                continue;
+            }
+            let idx = match p.shape {
+                PartShape::Block => 0,
+                PartShape::Wedge => 1,
+                PartShape::Ball => 2,
+                PartShape::Cylinder => 3,
+                PartShape::Head => 4,
+                PartShape::BevelBlock => 5,
+            };
+            if p.transparency > 0.04 {
+                self.trans_buckets[idx].push(PartInstance::from_part(p));
+            } else {
+                self.opaque_buckets[idx].push(PartInstance::from_part(p));
             }
         }
 
         self.merged_instances.clear();
-        let mut ranges = [(0u32, 0u32); 4];
-        for (i, bucket) in self.shape_buckets.iter().enumerate() {
+        let mut opaque_ranges = [(0u32, 0u32); SHAPE_COUNT];
+        for (i, bucket) in self.opaque_buckets.iter().enumerate() {
             let start = self.merged_instances.len() as u32;
             self.merged_instances.extend_from_slice(bucket);
             let end = self.merged_instances.len() as u32;
-            ranges[i] = (start, end);
+            opaque_ranges[i] = (start, end);
         }
+        let opaque_total = self.merged_instances.len();
 
+        let mut trans_ranges = [(0u32, 0u32); SHAPE_COUNT];
+        for (i, bucket) in self.trans_buckets.iter().enumerate() {
+            let start = self.merged_instances.len() as u32;
+            self.merged_instances.extend_from_slice(bucket);
+            let end = self.merged_instances.len() as u32;
+            trans_ranges[i] = (start, end);
+        }
         let total = self.merged_instances.len();
+        let trans_total = total - opaque_total;
+
         if total > self.instance_capacity {
             self.instance_capacity = total.next_power_of_two();
             self.instance_buf = device.create_buffer(&wgpu::BufferDescriptor {
@@ -712,7 +1118,7 @@ impl PartPipeline {
             label: Some("classic-roblox-encoder"),
         });
 
-        // Pass 1: Directional sun shadow map
+        // Pass 1: Directional sun shadow map (opaque parts cast crisp shadows)
         {
             let mut spass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow-pass"),
@@ -728,11 +1134,11 @@ impl PartPipeline {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
-            if total > 0 {
+            if opaque_total > 0 {
                 spass.set_pipeline(&self.shadow_pipeline);
                 spass.set_bind_group(0, &self.frame_bind_group, &[]);
                 spass.set_vertex_buffer(1, self.instance_buf.slice(..));
-                for (i, &(start, end)) in ranges.iter().enumerate() {
+                for (i, &(start, end)) in opaque_ranges.iter().enumerate() {
                     if end > start {
                         let mesh = &self.meshes[i];
                         spass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
@@ -743,7 +1149,7 @@ impl PartPipeline {
             }
         }
 
-        // Pass 2: Skybox + Lit & Shadowed Parts + Optional Mobile HUD
+        // Pass 2: Skybox + Opaque Parts + Transparent Parts + Optional Mobile HUD
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main-pass"),
@@ -772,18 +1178,35 @@ impl PartPipeline {
                 occlusion_query_set: None,
             });
 
-            // Procedural Classic Roblox sky dome + sun + clouds
+            // Classic Roblox skybox (GPU .rbxl cubemap or procedural sky + clouds)
             pass.set_pipeline(&self.sky_pipeline);
             pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            pass.set_bind_group(1, &self.shadow_bind_group, &[]);
             pass.draw(0..3, 0..1);
 
-            // Instanced parts by shape
-            if total > 0 {
+            // Opaque instanced parts by shape
+            if opaque_total > 0 {
                 pass.set_pipeline(&self.part_pipeline);
                 pass.set_bind_group(0, &self.frame_bind_group, &[]);
                 pass.set_bind_group(1, &self.shadow_bind_group, &[]);
                 pass.set_vertex_buffer(1, self.instance_buf.slice(..));
-                for (i, &(start, end)) in ranges.iter().enumerate() {
+                for (i, &(start, end)) in opaque_ranges.iter().enumerate() {
+                    if end > start {
+                        let mesh = &self.meshes[i];
+                        pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
+                        pass.set_index_buffer(mesh.index_buf.slice(..), wgpu::IndexFormat::Uint16);
+                        pass.draw_indexed(0..mesh.index_count, 0, start..end);
+                    }
+                }
+            }
+
+            // Semi-transparent parts (Glass windows, Water, ForceFields)
+            if trans_total > 0 {
+                pass.set_pipeline(&self.transparent_pipeline);
+                pass.set_bind_group(0, &self.frame_bind_group, &[]);
+                pass.set_bind_group(1, &self.shadow_bind_group, &[]);
+                pass.set_vertex_buffer(1, self.instance_buf.slice(..));
+                for (i, &(start, end)) in trans_ranges.iter().enumerate() {
                     if end > start {
                         let mesh = &self.meshes[i];
                         pass.set_vertex_buffer(0, mesh.vertex_buf.slice(..));
@@ -808,12 +1231,18 @@ impl PartPipeline {
 pub fn render_offscreen_png(
     parts: &[Part],
     sky: &SkyConfig,
+    tools: &[ToolItem],
     width: u32,
     height: u32,
     out_path: &std::path::Path,
 ) -> anyhow::Result<()> {
-    let visible: Vec<&Part> = parts.iter().filter(|p| p.transparency < 0.95).collect();
-    let (eye, target) = if visible.len() > 10 {
+    let visible: Vec<&Part> = parts.iter().filter(|p| p.transparency < 0.98).collect();
+    let char_head = visible.iter().find(|p| p.name == "CharHead");
+    let (eye, target) = if let Some(head) = char_head {
+        // Classic 3/4 hero camera framing the R6 character's face and starter world behind them
+        let focus = head.position + Vec3::new(-1.5, -0.8, -2.0);
+        (head.position + Vec3::new(6.5, 2.2, -9.5), focus)
+    } else if visible.len() > 30 {
         let mut sum = Vec3::ZERO;
         let mut count = 0.0_f32;
         for p in &visible {
@@ -825,16 +1254,30 @@ pub fn render_offscreen_png(
         let center = if count > 0.0 { sum / count } else { Vec3::ZERO };
         (center + Vec3::new(110.0, 75.0, 125.0), center + Vec3::new(0.0, 6.0, 0.0))
     } else {
-        (Vec3::new(14.0, 10.0, 18.0), Vec3::new(0.0, 1.0, 0.0))
+        (Vec3::new(14.0, 10.0, 18.0), Vec3::new(0.0, 2.0, -4.0))
     };
 
     let aspect = width as f32 / height as f32;
     let cam = build_camera_matrix(eye, target, aspect);
 
-    let frame = build_frame_uniform(eye, target, aspect, sky, 0.0, HudState::default());
-    // Try real wgpu headless rendering first (for simple scenes)
-    if visible.len() <= 10 {
-        if let Ok(rgba) = try_wgpu_offscreen(parts, width, height, frame) {
+    let mut tool_icons = [0u32; 6];
+    for (i, t) in tools.iter().take(6).enumerate() {
+        tool_icons[i] = t.icon as u32;
+    }
+    let hud = HudState {
+        screen_width: width as f32,
+        screen_height: height as f32,
+        health: 1.0,
+        tool_count: tools.len().min(6) as u32,
+        active_tool: if tools.is_empty() { -1 } else { 0 },
+        tool_icons,
+        show_touch_hud: false,
+        ..HudState::default()
+    };
+    let frame = build_frame_uniform(eye, target, aspect, sky, 0.0, hud);
+    // Use real wgpu headless rendering (with shadows, GPU skybox cubemap, materials, R6 meshes, CoreGui)
+    if visible.len() <= 50_000 {
+        if let Ok(rgba) = try_wgpu_offscreen(parts, sky, width, height, frame) {
             return write_png(out_path, width, height, &rgba);
         }
     }
@@ -1000,6 +1443,7 @@ impl SkyboxCubemap {
 
 fn try_wgpu_offscreen(
     parts: &[Part],
+    sky: &SkyConfig,
     width: u32,
     height: u32,
     frame: FrameUniform,
@@ -1033,7 +1477,8 @@ fn try_wgpu_offscreen(
     let color_view = color_tex.create_view(&wgpu::TextureViewDescriptor::default());
     let depth_view = PartPipeline::create_depth_view(&device, width, height);
     let mut pipeline = PartPipeline::new(&device, format);
-    pipeline.render_frame(&device, &queue, &color_view, &depth_view, parts, frame, false);
+    pipeline.load_skybox(&device, &queue, sky);
+    pipeline.render_frame(&device, &queue, &color_view, &depth_view, parts, frame, true);
 
     let padded_row = ((width * 4 + 255) / 256) * 256;
     let read_buf = device.create_buffer(&wgpu::BufferDescriptor {
