@@ -155,9 +155,6 @@ fn vs_main(model: VertexInput, inst: InstanceInput) -> VertexOutput {
 }
 
 fn sample_shadow(world_pos: vec3<f32>, n: vec3<f32>, sun_dir: vec3<f32>) -> f32 {
-    if (frame.ambient.w < 0.5) {
-        return 1.0;
-    }
     let ndotl = max(dot(n, sun_dir), 0.0);
     let bias_offset = n * (0.08 + 0.14 * (1.0 - ndotl));
     let light_clip = frame.light_view_proj * vec4<f32>(world_pos + bias_offset, 1.0);
@@ -165,19 +162,23 @@ fn sample_shadow(world_pos: vec3<f32>, n: vec3<f32>, sun_dir: vec3<f32>) -> f32 
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
     let depth = ndc.z;
 
-    if (uv.x < 0.01 || uv.x > 0.99 || uv.y < 0.01 || uv.y > 0.99 || depth < 0.0 || depth > 1.0) {
-        return 1.0;
-    }
+    let in_bounds = frame.ambient.w >= 0.5
+        && uv.x >= 0.01 && uv.x <= 0.99
+        && uv.y >= 0.01 && uv.y <= 0.99
+        && depth >= 0.0 && depth <= 1.0;
+
+    let clamped_uv = clamp(uv, vec2<f32>(0.002), vec2<f32>(0.998));
+    let cmp_depth = clamp(depth - 0.0015, 0.0, 1.0);
 
     let texel = 1.0 / 2048.0;
     var vis = 0.0;
     for (var y = -1; y <= 1; y = y + 1) {
         for (var x = -1; x <= 1; x = x + 1) {
             let off = vec2<f32>(f32(x), f32(y)) * texel;
-            vis += textureSampleCompare(shadow_map, shadow_sampler, uv + off, depth - 0.0015);
+            vis += textureSampleCompareLevel(shadow_map, shadow_sampler, clamped_uv + off, cmp_depth);
         }
     }
-    return vis / 9.0;
+    return select(1.0, vis / 9.0, in_bounds);
 }
 
 @fragment
