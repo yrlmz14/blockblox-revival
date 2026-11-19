@@ -60,19 +60,28 @@
     const log = (m) => { logEl.textContent += `\n${m}`; logEl.scrollTop = logEl.scrollHeight; };
 
     let wasmMod = null;
-    try {
-      const mod = await import('./pkg/revival_client.js');
-      await mod.default();
-      wasmMod = mod;
-      statusEl.textContent = 'WASM Engine Ready (WebGL2/WebGPU)';
-      statusEl.style.color = '#3fb950';
-      baseplateBtn.disabled = false;
-      offlineBtn.disabled = false;
-      log('Loaded Rust revival-client WASM module.');
-    } catch (err) {
-      statusEl.textContent = 'WASM bundle not built yet (./pkg/revival_client.js)';
+    if (location.protocol === 'file:') {
+      statusEl.textContent = 'Serve over HTTP (file:// blocked by browser)';
       statusEl.style.color = '#d29922';
-      log(`WASM not found yet: ${err.message}. Build via .github/workflows/build-wasm.yml or wasm-bindgen.`);
+      log('Browsers block WebAssembly & ES module imports on file:// URLs.');
+      log('Run a local web server in this folder, then open http://localhost:8000 :');
+      log('  python3 -m http.server 8000');
+      log('  (or: npx serve .)');
+    } else {
+      try {
+        const mod = await import('./pkg/revival_client.js');
+        await mod.default();
+        wasmMod = mod;
+        statusEl.textContent = 'WASM Engine Ready (WebGL2/WebGPU)';
+        statusEl.style.color = '#3fb950';
+        baseplateBtn.disabled = false;
+        offlineBtn.disabled = false;
+        log('Loaded Rust revival-client WASM module.');
+      } catch (err) {
+        statusEl.textContent = 'WASM load error (see log below)';
+        statusEl.style.color = '#f85149';
+        log(`Failed to load ./pkg/revival_client.js: ${err.message}`);
+      }
     }
 
     let launched = false;
