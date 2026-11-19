@@ -9,6 +9,15 @@ use glam::{Mat4, Vec3};
 use rbx_dom_weak::{types::Variant, ustr, Instance, WeakDom};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum PartShape {
+    #[default]
+    Block,
+    Wedge,
+    Ball,
+    Cylinder,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Part {
     pub id: u64,
@@ -19,6 +28,8 @@ pub struct Part {
     pub color: [f32; 3],
     pub transparency: f32,
     pub anchored: bool,
+    #[serde(default)]
+    pub shape: PartShape,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +37,8 @@ pub struct SkyConfig {
     pub sky_top: [f32; 3],
     pub sky_bottom: [f32; 3],
     pub sun_direction: Vec3,
+    pub ambient: [f32; 3],
+    pub brightness: f32,
     pub skybox_bk: Option<String>,
     pub skybox_dn: Option<String>,
     pub skybox_ft: Option<String>,
@@ -38,9 +51,11 @@ pub struct SkyConfig {
 impl Default for SkyConfig {
     fn default() -> Self {
         Self {
-            sky_top: [0.47, 0.71, 0.95],
-            sky_bottom: [0.69, 0.89, 0.99],
-            sun_direction: Vec3::new(0.45, 1.0, 0.35).normalize(),
+            sky_top: [0.27, 0.56, 0.92],
+            sky_bottom: [0.74, 0.89, 0.99],
+            sun_direction: Vec3::new(0.42, 0.85, 0.32).normalize(),
+            ambient: [0.38, 0.42, 0.48],
+            brightness: 1.15,
             skybox_bk: None,
             skybox_dn: None,
             skybox_ft: None,
@@ -135,19 +150,54 @@ impl DataModel {
         let base_id = dm.add_part(
             "Baseplate",
             Vec3::new(0.0, -1.0, 0.0),
-            Vec3::new(128.0, 2.0, 128.0),
+            Vec3::new(200.0, 2.0, 200.0),
             [0.39, 0.42, 0.45],
             true,
         );
         dm.attach_part_instance("Baseplate", ws, (base_id - 1) as usize);
         let spawn_id = dm.add_part(
-            "SpawnBlock",
-            Vec3::new(0.0, 2.0, 0.0),
-            Vec3::new(4.0, 4.0, 4.0),
-            [0.85, 0.25, 0.25],
+            "SpawnLocation",
+            Vec3::new(0.0, 0.5, 0.0),
+            Vec3::new(6.0, 1.0, 6.0),
+            [0.64, 0.64, 0.64],
             true,
         );
-        dm.attach_part_instance("SpawnBlock", ws, (spawn_id - 1) as usize);
+        dm.attach_part_instance("SpawnLocation", ws, (spawn_id - 1) as usize);
+        dm.spawn_points.push(Vec3::new(0.0, 4.5, 0.0));
+
+        // Classic starter structures so Baseplate mode feels alive
+        let ramp_id = dm.add_part_shaped(
+            "ClassicRamp",
+            Vec3::new(14.0, 3.0, -12.0),
+            Vec3::new(8.0, 6.0, 12.0),
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [0.85, 0.25, 0.20],
+            0.0,
+            true,
+            PartShape::Wedge,
+        );
+        dm.attach_part_instance("ClassicRamp", ws, (ramp_id - 1) as usize);
+
+        let tower_id = dm.add_part(
+            "ClassicPlatform",
+            Vec3::new(14.0, 5.5, -24.0),
+            Vec3::new(12.0, 1.0, 12.0),
+            [0.18, 0.55, 0.85],
+            true,
+        );
+        dm.attach_part_instance("ClassicPlatform", ws, (tower_id - 1) as usize);
+
+        let ball_id = dm.add_part_shaped(
+            "ClassicBall",
+            Vec3::new(-10.0, 4.0, -10.0),
+            Vec3::new(4.0, 4.0, 4.0),
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [0.95, 0.80, 0.18],
+            0.0,
+            false,
+            PartShape::Ball,
+        );
+        dm.attach_part_instance("ClassicBall", ws, (ball_id - 1) as usize);
         dm
     }
 
@@ -198,6 +248,30 @@ impl DataModel {
         transparency: f32,
         anchored: bool,
     ) -> u64 {
+        self.add_part_shaped(
+            name,
+            position,
+            size,
+            rotation,
+            color,
+            transparency,
+            anchored,
+            PartShape::Block,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_part_shaped(
+        &mut self,
+        name: impl Into<String>,
+        position: Vec3,
+        size: Vec3,
+        rotation: [[f32; 3]; 3],
+        color: [f32; 3],
+        transparency: f32,
+        anchored: bool,
+        shape: PartShape,
+    ) -> u64 {
         self.next_id += 1;
         let id = self.next_id;
         self.parts.push(Part {
@@ -209,6 +283,7 @@ impl DataModel {
             color,
             transparency,
             anchored,
+            shape,
         });
         id
     }
@@ -254,7 +329,8 @@ impl DataModel {
             let mut disabled = false;
 
             match inst.class.as_str() {
-                "Part" | "WedgePart" | "CornerWedgePart" | "TrussPart" | "SpawnLocation" => {
+                "Part" | "WedgePart" | "CornerWedgePart" | "TrussPart" | "SpawnLocation"
+                | "Seat" | "VehicleSeat" | "MeshPart" => {
                     let (pos, rot, size, color, transparency, mut anchored) = extract_part_props(inst);
                     if inst.class.as_str() == "SpawnLocation" {
                         self.spawn_points.push(pos + Vec3::new(0.0, size.y * 0.5 + 3.5, 0.0));
@@ -272,7 +348,27 @@ impl DataModel {
                             anchored = true;
                         }
                     }
-                    self.add_part_full(
+                    let shape = match inst.class.as_str() {
+                        "WedgePart" | "CornerWedgePart" => PartShape::Wedge,
+                        _ => match inst
+                            .properties
+                            .get(&ustr("shape"))
+                            .or_else(|| inst.properties.get(&ustr("Shape")))
+                        {
+                            Some(Variant::Enum(e)) => match e.to_u32() {
+                                0 => PartShape::Ball,
+                                2 => PartShape::Cylinder,
+                                _ => PartShape::Block,
+                            },
+                            Some(Variant::Int32(n)) => match *n {
+                                0 => PartShape::Ball,
+                                2 => PartShape::Cylinder,
+                                _ => PartShape::Block,
+                            },
+                            _ => PartShape::Block,
+                        },
+                    };
+                    self.add_part_shaped(
                         inst.name.clone(),
                         pos,
                         size,
@@ -280,6 +376,7 @@ impl DataModel {
                         color,
                         transparency,
                         anchored,
+                        shape,
                     );
                     part_index = Some(self.parts.len() - 1);
                 }
@@ -297,6 +394,18 @@ impl DataModel {
                     }
                 }
                 "Lighting" => {
+                    if let Some(Variant::Color3(c)) = inst
+                        .properties
+                        .get(&ustr("OutdoorAmbient"))
+                        .or_else(|| inst.properties.get(&ustr("Ambient")))
+                    {
+                        if c.r + c.g + c.b > 0.05 {
+                            self.sky.ambient = [c.r.clamp(0.15, 0.8), c.g.clamp(0.15, 0.8), c.b.clamp(0.15, 0.8)];
+                        }
+                    }
+                    if let Some(Variant::Float32(b)) = inst.properties.get(&ustr("Brightness")) {
+                        self.sky.brightness = b.clamp(0.4, 2.5);
+                    }
                     if let Some(Variant::Color3(c)) = inst.properties.get(&ustr("ColorShift_Top")) {
                         if c.r + c.g + c.b > 0.05 {
                             self.sky.sky_top = [c.r, c.g, c.b];
