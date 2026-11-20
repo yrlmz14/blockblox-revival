@@ -2447,6 +2447,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "revival-raknet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "revival-core",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "revival-server"
 version = "0.1.0"
 dependencies = [
@@ -2454,6 +2464,7 @@ dependencies = [
  "axum",
  "revival-core",
  "revival-net",
+ "revival-raknet",
  "serde",
  "serde_json",
  "tokio",

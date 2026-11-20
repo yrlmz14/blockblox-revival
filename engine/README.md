@@ -3,14 +3,20 @@
 ## Crates
 - `crates/core`: `DataModel`, `.rbxl`/`.rbxlx` loader (`rbx-dom`), and sandboxed `Luau` VM (`mlua`).
 - `crates/net`: Shared WebSocket protocol (`ClientMessage`, `ServerMessage`, `ServerInfo`).
-- `crates/server`: Lightweight `axum` + `tokio` headless server optimized for **Raspberry Pi Zero 2 W** (512 MB RAM, `aarch64-unknown-linux-gnu`).
+- `crates/raknet`: Clean-room 2016 Legacy RCC (RakNet UDP framing, reliability, split-packet reassembly, and 2016 Roblox `0x81..0x97` protocol packets).
+- `crates/server`: Lightweight `axum` + `tokio` dual-stack headless server (HTTP/WS + 2016 RakNet UDP on `:53640`) optimized for **Raspberry Pi Zero 2 W** (512 MB RAM, `aarch64-unknown-linux-gnu`).
 - `crates/client`: Cross-platform client core (`wgpu` + `winit`) for macOS, Android `arm64-v8a`, and iOS WebAssembly.
 
 ## Running the Server Locally
 ```bash
 cargo run -p revival-server
-# Optional: load a custom place file
-PLACE_FILE=./my_place.rbxlx PORT=8080 cargo run -p revival-server
+# Optional: load a custom place file & enable live RakNet packet tracing
+PLACE_FILE=./my_place.rbxlx PORT=8080 RAKNET_PORT=53640 RAKNET_TRACE=1 cargo run -p revival-server
+```
+
+## Inspecting Wireshark `.pcap` Captures (2012–2016 RakNet)
+```bash
+cargo run -p revival-raknet --bin raknet-inspect -- capture.pcap 53640
 ```
 
 ## Building for Raspberry Pi Zero 2 W (`aarch64`)

@@ -132,19 +132,27 @@ flowchart TD
 
 ```text
 /
-├── engine/                 # Core cross-platform engine (Rust or C++)
-│   ├── core/               # DataModel, Instance tree, Reflection, Luau VM
-│   ├── render/             # wgpu / Raylib renderer + 2D GUI
-│   ├── physics/            # Rapier / Jolt integration
-│   ├── net/                # WebSocket replication (client + headless server)
-│   └── targets/
-│       ├── desktop/        # macOS (and Linux/Windows) runner
-│       ├── android-jni/    # Android arm64-v8a shared library + JNI bridge
-│       ├── wasm/           # iOS Safari WebAssembly entry + JS glue
-│       └── headless/       # Dedicated online server binary
+├── engine/                 # Core cross-platform engine (Rust)
+│   └── crates/
+│       ├── core/           # DataModel, Instance tree, Luau VM, Rapier physics
+│       ├── net/            # WebSocket JSON replication protocol
+│       ├── raknet/         # Clean-room 2016 Legacy RCC (RakNet UDP + 0x81..0x97 protocol)
+│       ├── server/         # Dual-stack headless server (HTTP/WS :8080 + 2016 RakNet UDP :53640)
+│       └── client/         # Cross-platform wgpu client (macOS, Android JNI, WASM)
 ├── launchers/
 │   ├── android-libreblox/  # Forked Kotlin/Compose LibreBlox launcher
-│   └── web-tauri/          # Shared Svelte/TS UI for iOS PWA & macOS Tauri
-├── backend/                # Master server (Auth, Server Browser, Asset CDN)
+│   └── web-pwa/            # Web / iOS PWA launcher shell
 └── plan.md                 # This project plan
 ```
+
+---
+
+## 8. 2016 Legacy RCC Protocol Adapter (`engine/crates/raknet`)
+
+To allow legacy 2016 (and 2012-era) desktop clients to connect to our open-source server without copying proprietary RCC binaries:
+
+- **Transport:** Clean-room RakNet UDP framing (`0x05`/`0x06`/`0x07`/`0x08` offline handshake, `0xC0`/`0xA0` ACK/NAK ranges, `0x84` data datagrams, reliability modes, and MTU split-packet fragmentation/reassembly).
+- **2016 Application Handshake:** `ID_CONNECTION_REQUEST` (`0x09`) → `ID_CONNECTION_REQUEST_ACCEPTED` (`0x10`) → `ID_NEW_INCOMING_CONNECTION` (`0x13`) → `ID_PROTOCOL_SYNC` (`0x90`), `ID_SET_GLOBALS` (`0x81`), `ID_PLACEID_VERIFICATION` (`0x92`), `ID_SUBMIT_TICKET` (`0x8A`), `ID_DATA` (`0x83`), `ID_MARKER` (`0x84`), and `ID_CHAT_ALL` (`0x87`).
+- **Packet Inspector:** Set `RAKNET_TRACE=1` when running `revival-server` to log Wireshark-style decoded RakNet/2016 packets live.
+- **Join Endpoint:** `GET /Game/Join.ashx` exposes the legacy JSON join descriptor pointing to `RAKNET_PORT` (default `53640`).
+

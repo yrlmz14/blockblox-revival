@@ -1,0 +1,15 @@
+[package]
+name = "revival-raknet"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Clean-room 2016 Roblox RakNet UDP protocol and legacy RCC server adapter"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+tokio = { version = "1", features = ["net", "sync", "time", "rt"] }
+revival-core = { path = "../core", default-features = false }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
