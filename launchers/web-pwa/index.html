@@ -21,11 +21,12 @@
     button.secondary { background: #21262d; border-color: #30363d; }
     button:disabled { opacity: 0.5; cursor: not-allowed; }
     #revival-canvas { width: 100%; aspect-ratio: 16 / 9; display: block; border-radius: 10px; background: #090c10; border: 1px solid #30363d; touch-action: none; }
-    pre { margin: 10px 0 0; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px; font-size: 0.78rem; max-height: 120px; overflow: auto; color: #8b949e; }
+    .drop-active #revival-canvas { border-color: #388bfd; box-shadow: 0 0 0 3px rgba(56,139,253,0.35); }
+    pre { margin: 10px 0 0; background: #0d1117; border: 1px solid #30363d; border-radius: 8px; padding: 10px; font-size: 0.78rem; max-height: 140px; overflow: auto; color: #8b949e; }
   </style>
 </head>
 <body>
-  <div class="card">
+  <div class="card" id="dropZone">
     <div class="header">
       <h1>BlockBlox Revival (WebAssembly / PWA)</h1>
       <span id="wasmStatus" class="badge">Loading WASM engine…</span>
@@ -33,7 +34,8 @@
 
     <div class="row">
       <button id="baseplateBtn" class="primary" disabled>Play Baseplate</button>
-      <input id="placeFile" type="file" accept=".rbxl,.rbxlx" />
+      <!-- No `accept` attribute so iOS Safari / macOS / Android never grey out .rbxl/.rbxlx files -->
+      <input id="placeFile" type="file" />
       <button id="offlineBtn" disabled>Play Local .rbxl / .rbxlx</button>
     </div>
 
@@ -43,7 +45,7 @@
     </div>
 
     <canvas id="revival-canvas" width="960" height="540"></canvas>
-    <pre id="log">Controls: WASD move · Space jump · Drag to orbit · 1–6 equip tools</pre>
+    <pre id="log">Controls: WASD move · Space jump · Drag to orbit · 1–6 equip tools · Drag & drop any .rbxl/.rbxlx file</pre>
   </div>
 
   <script type="module">
@@ -51,6 +53,8 @@
     const statusEl = document.getElementById('wasmStatus');
     const baseplateBtn = document.getElementById('baseplateBtn');
     const offlineBtn = document.getElementById('offlineBtn');
+    const placeFileEl = document.getElementById('placeFile');
+    const dropZone = document.getElementById('dropZone');
     const serverUrlEl = document.getElementById('serverUrl');
 
     if (location.host) {
@@ -84,41 +88,44 @@
       }
     }
 
-    let launched = false;
-    const ensureSingleLaunch = () => {
-      if (launched) {
-        log('Reload the page to switch places.');
-        return false;
+    async function loadFile(file) {
+      if (!wasmMod) return log('WASM engine is not loaded yet.');
+      if (!file) return log('Select a .rbxl or .rbxlx file first.');
+      const buf = new Uint8Array(await file.arrayBuffer());
+      log(`Loading "${file.name}" (${buf.byteLength.toLocaleString()} bytes)…`);
+      try {
+        const info = wasmMod.start_place_bytes(buf);
+        if (info) log(info);
+      } catch (e) {
+        log(`Failed to load "${file.name}": ${e}`);
       }
-      launched = true;
-      baseplateBtn.disabled = true;
-      offlineBtn.disabled = true;
-      return true;
-    };
+    }
 
     baseplateBtn.onclick = () => {
-      if (!wasmMod || !ensureSingleLaunch()) return;
-      log('Starting offline Baseplate in Rust WASM engine…');
+      if (!wasmMod) return;
+      log('Starting offline Baseplate…');
       try {
-        wasmMod.start_baseplate();
+        const info = wasmMod.start_baseplate();
+        if (info) log(info);
       } catch (e) {
         log(`Engine error: ${e}`);
       }
     };
 
-    offlineBtn.onclick = async () => {
-      if (!wasmMod) return;
-      const file = document.getElementById('placeFile').files[0];
-      if (!file) return log('Select a .rbxl or .rbxlx file first.');
-      if (!ensureSingleLaunch()) return;
-      const buf = new Uint8Array(await file.arrayBuffer());
-      log(`Loading "${file.name}" (${buf.byteLength} bytes) into Rust WASM engine…`);
-      try {
-        wasmMod.start_place_bytes(buf);
-      } catch (e) {
-        log(`Failed to load place: ${e}`);
-      }
+    offlineBtn.onclick = () => loadFile(placeFileEl.files[0]);
+    placeFileEl.onchange = () => {
+      if (placeFileEl.files[0]) loadFile(placeFileEl.files[0]);
     };
+
+    // Drag & drop any .rbxl / .rbxlx file directly onto the page
+    dropZone.addEventListener('dragover', (e) => { e.preventDefault(); dropZone.classList.add('drop-active'); });
+    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drop-active'));
+    dropZone.addEventListener('drop', (e) => {
+      e.preventDefault();
+      dropZone.classList.remove('drop-active');
+      const file = e.dataTransfer?.files?.[0];
+      if (file) loadFile(file);
+    });
 
     document.getElementById('connectBtn').onclick = () => {
       const url = serverUrlEl.value.trim();

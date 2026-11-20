@@ -712,12 +712,24 @@ impl DataModel {
 
     /// Load a binary `.rbxl` or XML `.rbxlx` place file from bytes.
     pub fn from_place_bytes(bytes: &[u8]) -> Result<Self> {
+        let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+        let trimmed = bytes
+            .iter()
+            .position(|b| !b.is_ascii_whitespace())
+            .map_or(bytes, |i| &bytes[i..]);
+
         let dom = if bytes.starts_with(b"<roblox!") {
             rbx_binary::from_reader(Cursor::new(bytes))
                 .context("failed to parse binary .rbxl")?
+        } else if trimmed.starts_with(b"<roblox!") {
+            rbx_binary::from_reader(Cursor::new(trimmed))
+                .context("failed to parse binary .rbxl")?
         } else {
-            rbx_xml::from_reader_default(Cursor::new(bytes))
-                .context("failed to parse XML .rbxlx")?
+            rbx_xml::from_reader_default(Cursor::new(trimmed))
+                .or_else(|xml_err| {
+                    rbx_binary::from_reader(Cursor::new(bytes)).map_err(|_| xml_err)
+                })
+                .context("failed to parse XML .rbxlx / binary .rbxl")?
         };
 
         let mut dm = Self::default();

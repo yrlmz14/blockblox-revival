@@ -553,26 +553,49 @@ impl ClientApp {
 }
 
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen::prelude::wasm_bindgen]
-pub fn start_baseplate() -> Result<(), wasm_bindgen::JsValue> {
-    let mut session = ClientSession::offline_baseplate();
-    let _ = session.data_model.run_luau_scripts_mut();
-    session.physics = PhysicsWorld::from_data_model(&session.data_model);
+thread_local! {
+    static WASM_RUNNING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static WASM_PENDING_SESSION: std::cell::RefCell<Option<ClientSession>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn wasm_launch_or_swap(session: ClientSession) -> Result<String, wasm_bindgen::JsValue> {
+    let summary = format!(
+        "Loaded {} parts, {} tools",
+        session.data_model.parts.len(),
+        session.data_model.tools.len()
+    );
+    let already_running = WASM_RUNNING.with(|r| r.get());
+    if already_running {
+        WASM_PENDING_SESSION.with(|p| *p.borrow_mut() = Some(session));
+        return Ok(summary);
+    }
+    WASM_RUNNING.with(|r| r.set(true));
     let mut client = ClientApp::new(session);
     client.auto_frame_camera();
-    client.run_wasm()
+    client.run_wasm()?;
+    Ok(summary)
 }
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen::prelude::wasm_bindgen]
-pub fn start_place_bytes(bytes: &[u8]) -> Result<(), wasm_bindgen::JsValue> {
+pub fn start_baseplate() -> Result<String, wasm_bindgen::JsValue> {
+    console_error_panic_hook::set_once();
+    let mut session = ClientSession::offline_baseplate();
+    let _ = session.data_model.run_luau_scripts_mut();
+    session.physics = PhysicsWorld::from_data_model(&session.data_model);
+    wasm_launch_or_swap(session)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn start_place_bytes(bytes: &[u8]) -> Result<String, wasm_bindgen::JsValue> {
+    console_error_panic_hook::set_once();
     let mut session = ClientSession::from_place_bytes(bytes)
         .map_err(|e| wasm_bindgen::JsValue::from_str(&format!("failed to parse place: {e:#}")))?;
     let _ = session.data_model.run_luau_scripts_mut();
     session.physics = PhysicsWorld::from_data_model(&session.data_model);
-    let mut client = ClientApp::new(session);
-    client.auto_frame_camera();
-    client.run_wasm()
+    wasm_launch_or_swap(session)
 }
 
 #[cfg(target_os = "android")]
@@ -708,12 +731,19 @@ impl ApplicationHandler for ClientApp {
             let w = size.width.max(1);
             let h = size.height.max(1);
             wasm_bindgen_futures::spawn_local(async move {
+                let log_err = |msg: &str| {
+                    web_sys::console::error_1(&wasm_bindgen::JsValue::from_str(msg));
+                };
                 let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
                     backends: wgpu::Backends::GL | wgpu::Backends::BROWSER_WEBGPU,
                     ..Default::default()
                 });
-                let Ok(surface) = instance.create_surface(win_clone.clone()) else {
-                    return;
+                let surface = match instance.create_surface(win_clone.clone()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log_err(&format!("[revival-wasm] create_surface failed: {e}"));
+                        return;
+                    }
                 };
                 let Some(adapter) = instance
                     .request_adapter(&wgpu::RequestAdapterOptions {
@@ -723,6 +753,7 @@ impl ApplicationHandler for ClientApp {
                     })
                     .await
                 else {
+                    log_err("[revival-wasm] request_adapter returned None (WebGL2 unavailable)");
                     return;
                 };
                 let desc = wgpu::DeviceDescriptor {
@@ -730,14 +761,20 @@ impl ApplicationHandler for ClientApp {
                         .using_resolution(adapter.limits()),
                     ..Default::default()
                 };
-                let Ok((device, queue)) = adapter.request_device(&desc, None).await else {
-                    return;
+                let (device, queue) = match adapter.request_device(&desc, None).await {
+                    Ok(dq) => dq,
+                    Err(e) => {
+                        log_err(&format!("[revival-wasm] request_device failed: {e}"));
+                        return;
+                    }
                 };
                 let caps = surface.get_capabilities(&adapter);
                 let Some(format) = caps.formats.first().copied() else {
+                    log_err("[revival-wasm] no supported surface formats");
                     return;
                 };
                 let Some(alpha_mode) = caps.alpha_modes.first().copied() else {
+                    log_err("[revival-wasm] no supported alpha modes");
                     return;
                 };
                 let config = wgpu::SurfaceConfiguration {
@@ -753,6 +790,9 @@ impl ApplicationHandler for ClientApp {
                 surface.configure(&device, &config);
                 let depth_view = PartPipeline::create_depth_view(&device, config.width, config.height);
                 let pipeline = PartPipeline::new(&device, format);
+                web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!(
+                    "[revival-wasm] wgpu initialized ({w}x{h}, {format:?})"
+                )));
                 *pending.borrow_mut() = Some(GpuState {
                     window: win_clone.clone(),
                     surface,
@@ -992,9 +1032,17 @@ impl ApplicationHandler for ClientApp {
 
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         #[cfg(target_arch = "wasm32")]
-        if self.gpu.is_none() {
-            if let Some(g) = self.pending_gpu.borrow_mut().take() {
-                self.gpu = Some(g);
+        {
+            if self.gpu.is_none() {
+                if let Some(g) = self.pending_gpu.borrow_mut().take() {
+                    self.gpu = Some(g);
+                }
+            }
+            if let Some(mut new_session) = WASM_PENDING_SESSION.with(|p| p.borrow_mut().take()) {
+                self.character = CharacterState::spawn(&mut new_session.data_model);
+                self.session = new_session;
+                self.active_tool = if self.session.data_model.tools.is_empty() { -1 } else { 0 };
+                self.auto_frame_camera();
             }
         }
         let now = now_secs();
